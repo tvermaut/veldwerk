@@ -83,7 +83,7 @@ P7 -- P4 [25]"></textarea>
 
     function parseInput(text) {
       const nodeMap = new Map();
-      const segments = [];
+      const allSegments = [];
       const chains = [];
 
       function getNode(id) {
@@ -106,58 +106,54 @@ P7 -- P4 [25]"></textarea>
         .map(l => l.trim())
         .filter(l => l.length > 0);
 
-      // Parse individuele chains per regel
+      // Parse per regel met robuuste tokenization
       lines.forEach((line, lineIndex) => {
-        const rawParts = line.split(/(-gebouw-)|(--)/i).filter(p => p && p.trim() !== '');
-        const tokens = [];
-        for (const part of rawParts) {
-          const trimmed = part.trim();
-          if (/^-?gebouw-?$/i.test(trimmed)) {
-            tokens.push({type: 'connector', value: 'gebouw'});
-          } else if (trimmed === '--') {
-            tokens.push({type: 'connector', value: 'default'});
-          } else {
-            tokens.push({type: 'node', value: trimmed});
-          }
-        }
-
+        // Split op node-connector patronen
+        const nodeTokens = line.match(/([A-Z0-9]+(?:\([^)]*\)|\s*\[.*?\])?)/gi) || [];
+        const connectors = line.match(/(?:--|-gebouw-)/gi) || [];
+        
         const lineNodes = [];
-        const lineSegs = [];
-        for (let i = 0; i < tokens.length - 2; i += 2) {
-          const tA = tokens[i];
-          const tC = tokens[i + 1];
-          const tB = tokens[i + 2];
-          if (tA.type !== 'node' || tC.type !== 'connector' || tB.type !== 'node') continue;
-
-          const nodeA = parseNodeToken(tA.value, getNode);
-          const nodeB = parseNodeToken(tB.value, getNode);
+        const lineSegments = [];
+        
+        for (let i = 0; i < nodeTokens.length - 1 && i < connectors.length; i++) {
+          const nodeA = parseNodeToken(nodeTokens[i].trim(), getNode);
+          const nodeB = parseNodeToken(nodeTokens[i + 1].trim(), getNode);
           nodeA.chainId = lineIndex;
           nodeB.chainId = lineIndex;
-          lineNodes.push(nodeA, nodeB);
-
-          const distMatch = tB.value.match(/\[([^\]]+)\]/);
+          
           let dist = null;
+          const distMatch = nodeTokens[i + 1].match(/\[([^\]]+)\]/);
           if (distMatch) {
-            const d = parseFloat(distMatch[1].trim().replace(',', '.'));
-            if (!isNaN(d)) dist = d;
+            dist = parseFloat(distMatch[1].trim().replace(',', '.'));
           }
-
-          const segType = tC.value === 'gebouw' ? 'gebouw' : 'default';
-          lineSegs.push({from: nodeA, to: nodeB, dist, type: segType});
-          segments.push({from: nodeA, to: nodeB, dist, type: segType});
+          
+          const connector = connectors[i] || '--';
+          const segType = connector.toLowerCase().includes('gebouw') ? 'gebouw' : 'default';
+          
+          lineNodes.push(nodeA, nodeB);
+          const seg = {from: nodeA, to: nodeB, dist, type: segType};
+          lineSegments.push(seg);
+          allSegments.push(seg);
         }
+        
         if (lineNodes.length > 0) {
-          chains.push({nodes: [...new Set(lineNodes)], segments: lineSegs, lineIndex});
+          chains.push({
+            nodes: [...new Set(lineNodes)], 
+            segments: lineSegments, 
+            lineIndex
+          });
         }
       });
 
       const nodes = Array.from(nodeMap.values());
-      
-      // MERGE chains die overlappen via gedeelde nodes
+
+      // MERGE overlappende chains
       const mergedChains = [];
       const visited = new Set();
+      
       chains.forEach((chain, i) => {
         if (visited.has(i)) return;
+        
         const superChain = {
           nodes: [...chain.nodes],
           segments: [...chain.segments],
@@ -165,11 +161,11 @@ P7 -- P4 [25]"></textarea>
         };
         visited.add(i);
         
-        // Recursief alle overlappende chains toevoegen
         function expand(currentChain) {
           chains.forEach((other, j) => {
             if (visited.has(j)) return;
-            const overlap = currentChain.nodes.some(n => other.nodes.includes(n));
+            const overlap = currentChain.nodes.some(n => 
+              other.nodes.includes(n));
             if (overlap) {
               visited.add(j);
               superChain.nodes.push(...other.nodes);
@@ -185,11 +181,11 @@ P7 -- P4 [25]"></textarea>
         mergedChains.push(superChain);
       });
       
-      return {nodes, segments, chains: mergedChains};
+      return {nodes, segments: allSegments, chains: mergedChains};
     }
 
     function parseNodeToken(raw, getNode) {
-      const idMatch = raw.match(/^[^\s\(\[]+/);
+      const idMatch = raw.match(/^[A-Z0-9]+/i);
       const id = idMatch ? idMatch[0] : raw.trim();
       const node = getNode(id);
 
@@ -209,49 +205,48 @@ P7 -- P4 [25]"></textarea>
       if (nodes.length === 0) return;
       const idealScale = 5;
 
-      // Stap 1: Per subchain PERFECT rechte lijn maken
+      // Stap 1: Per subchain PERFECT rechte lijn
       chains.forEach((superChain, superIndex) => {
         superChain.subchains.forEach((chain) => {
-          if (chain.nodes.length === 0) return;
+          if (chain.nodes.length === 0 || chain.segments.length === 0) return;
 
-          // Expliciete lineaire volgorde
-          let order = [];
-          if (chain.segments.length > 0) {
-            let current = chain.segments[0].from;
-            order = [current];
-            for (const seg of chain.segments) {
-              const nextNode = seg.from === current ? seg.to : seg.from;
-              if (!order.includes(nextNode)) {
-                order.push(nextNode);
-                current = nextNode;
-              }
+          // Bouw EXACTE lineaire volgorde
+          const order = [];
+          let current = chain.segments[0].from;
+          order.push(current);
+          
+          for (const seg of chain.segments) {
+            if (seg.from === current && !order.includes(seg.to)) {
+              order.push(seg.to);
+              current = seg.to;
+            } else if (seg.to === current && !order.includes(seg.from)) {
+              order.push(seg.from);
+              current = seg.from;
             }
-          } else {
-            order = chain.nodes;
           }
           
           chain.order = order;
 
-          // Cumulatieve afstanden (exact!)
+          // Cumulatieve afstanden EXACT
           let cum = 0;
           order.forEach((node, i) => {
             if (i === 0) {
               node.tempPos = 0;
-              cum = 0;
             } else {
               const prev = order[i - 1];
               const seg = chain.segments.find(s =>
-                (s.from === prev && s.to === node) || (s.to === prev && s.from === node));
+                (s.from === prev && s.to === node) || 
+                (s.to === prev && s.from === node));
               cum += seg?.dist || 1;
               node.tempPos = cum;
             }
           });
 
-          // Initiële plaatsing met verschillende oriëntatie
+          // Initiele plaatsing
           const baseAngle = superIndex * 0.8 + chain.lineIndex * 0.2;
           order.forEach(node => {
             if (node.fixed) return;
-            const t = node.tempPos * idealScale;
+            const t = (node.tempPos || 0) * idealScale;
             node.x = t * Math.cos(baseAngle);
             node.y = t * Math.sin(baseAngle);
             node.chainAngle = baseAngle;
@@ -259,44 +254,46 @@ P7 -- P4 [25]"></textarea>
         });
       });
 
-      // Stap 2: Globale optimalisatie per superchain
-      const iterations = 150;
+      // Stap 2: Optimalisatie KETENS als geheel
+      const iterations = 200;
       for (let it = 0; it < iterations; it++) {
         chains.forEach((superChain) => {
-          // Krachten berekenen tussen subchains
           const chainForces = new Map();
-          superChain.subchains.forEach(chain => chainForces.set(chain, {fx: 0, fy: 0}));
+          superChain.subchains.forEach(chain => 
+            chainForces.set(chain, {fx: 0, fy: 0})
+          );
 
-          // Repulsie tussen nodes van verschillende subchains
+          // Repulsie tussen verschillende subchains
           for (let i = 0; i < nodes.length; i++) {
             for (let j = i + 1; j < nodes.length; j++) {
               const a = nodes[i];
               const b = nodes[j];
-              if (a.chainId === b.chainId || a.x == null || b.x == null) continue;
+              if (a.x == null || b.x == null || a.chainId === b.chainId) continue;
 
               let dx = b.x - a.x;
               let dy = b.y - a.y;
               let dist2 = dx * dx + dy * dy + 0.1;
-              let force = 80 / dist2;
+              let force = 100 / dist2;
               dx /= Math.sqrt(dist2);
               dy /= Math.sqrt(dist2);
 
               const chainA = superChain.subchains.find(c => c.lineIndex === a.chainId);
               const chainB = superChain.subchains.find(c => c.lineIndex === b.chainId);
+              
               if (chainA) {
                 const fa = chainForces.get(chainA);
-                fa.fx += dx * force * 0.3;
-                fa.fy += dy * force * 0.3;
+                fa.fx += dx * force * 0.4;
+                fa.fy += dy * force * 0.4;
               }
               if (chainB) {
                 const fb = chainForces.get(chainB);
-                fb.fx -= dx * force * 0.3;
-                fb.fy -= dy * force * 0.3;
+                fb.fx -= dx * force * 0.4;
+                fb.fy -= dy * force * 0.4;
               }
             }
           }
 
-          // Inter-subchain afstanden respecteren
+          // Inter-chain afstanden
           for (const seg of superChain.segments) {
             const a = seg.from;
             const b = seg.to;
@@ -310,28 +307,29 @@ P7 -- P4 [25]"></textarea>
             dy /= dist;
             let desired = target || dist;
             let delta = dist - desired;
-            let force = 0.8 * delta;
+            let forceMag = 1.0 * delta;
 
             const chainA = superChain.subchains.find(c => c.lineIndex === a.chainId);
             const chainB = superChain.subchains.find(c => c.lineIndex === b.chainId);
+            
             if (chainA) {
               const fa = chainForces.get(chainA);
-              fa.fx += dx * force;
-              fa.fy += dy * force;
+              fa.fx += dx * forceMag;
+              fa.fy += dy * forceMag;
             }
             if (chainB) {
               const fb = chainForces.get(chainB);
-              fb.fx -= dx * force;
-              fb.fy -= dy * force;
+              fb.fx -= dx * forceMag;
+              fb.fy -= dy * forceMag;
             }
           }
 
-          // Beweeg subchains als geheel
+          // Beweeg subchains RIGID
           superChain.subchains.forEach(chain => {
             if (!chain.order || chain.order.length === 0) return;
             
             const force = chainForces.get(chain);
-            if (!force) return;
+            if (!force || (force.fx === 0 && force.fy === 0)) return;
 
             // Center of mass
             let cx = 0, cy = 0, count = 0;
@@ -343,13 +341,14 @@ P7 -- P4 [25]"></textarea>
             if (count === 0) return;
             cx /= count; cy /= count;
 
-            const rotForce = Math.atan2(force.fy, force.fx) * 0.015;
+            // Rotatie + translatie
+            const rotForce = Math.atan2(force.fy, force.fx) * 0.01;
             const newAngle = chain.order[0].chainAngle + rotForce;
 
-            // Herplaats EXACT langs rechte lijn
+            // EXACT herplaatsen langs rechte lijn
             chain.order.forEach(node => {
               if (node.fixed) return;
-              const t = node.tempPos * idealScale;
+              const t = (node.tempPos || 0) * idealScale;
               node.x = cx + t * Math.cos(newAngle);
               node.y = cy + t * Math.sin(newAngle);
               node.chainAngle = newAngle;
@@ -365,11 +364,10 @@ P7 -- P4 [25]"></textarea>
 
       const xs = nodes.map(n => n.x).filter(x => x != null);
       const ys = nodes.map(n => n.y).filter(y => y != null);
-      let minX = Math.min(...xs), maxX = Math.max(...xs);
-      let minY = Math.min(...ys), maxY = Math.max(...ys);
-      
-      if (xs.length === 0 || minX === maxX) { minX -= 10; maxX += 10; }
-      if (ys.length === 0 || minY === maxY) { minY -= 10; maxY += 10; }
+      let minX = xs.length ? Math.min(...xs) : 0;
+      let maxX = xs.length ? Math.max(...xs) : 20;
+      let minY = ys.length ? Math.min(...ys) : 0;
+      let maxY = ys.length ? Math.max(...ys) : 20;
       
       const pad = 8;
       const width = maxX - minX;
@@ -426,7 +424,7 @@ P7 -- P4 [25]"></textarea>
       }
     }
 
-    // Init met driehoek voorbeeld
+    // Init
     textarea.value = `P1 -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
 P1 -- P5 [0.4] -gebouw- P6 [10.55] -- P7 [11.8]
 P7 -- P4 [25]`;
