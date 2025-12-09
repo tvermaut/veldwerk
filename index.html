@@ -2,14 +2,15 @@
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
-  <title>Kadastrale metingen LSQ</title>
+  <title>Kadastrale metingen – LSQ lijnen</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: sans-serif; height: 100vh; display: flex; }
     #left { width: 50%; padding: 10px; border-right: 1px solid #ccc; }
     #right { width: 50%; padding: 10px; }
-    textarea { width: 100%; height: calc(100vh - 20px); font-family: monospace; font-size: 13px; }
-    svg { width: 100%; height: 100%; border: 1px solid #ccc; background: #fafafa; }
+    textarea { width: 100%; height: calc(100vh - 50px); font-family: monospace; font-size: 13px; }
+    button { margin-top: 5px; }
+    svg { width: 100%; height: calc(100vh - 20px); border: 1px solid #ccc; background: #fafafa; }
     .point { fill: #0074D9; stroke: #003366; stroke-width: 1; }
     .point-label { font-size: 11px; fill: #000; }
     .distance-label { font-size: 10px; fill: #555; }
@@ -28,7 +29,7 @@ P7 -- P4 [25]
     <button id="solveBtn">Herbereken</button>
   </div>
   <div id="right">
-    <svg id="viewBox" viewBox="0 0 100 100"></svg>
+    <svg id="viewBox"></svg>
   </div>
 
 <script>
@@ -39,14 +40,16 @@ const solveBtn = document.getElementById('solveBtn');
 solveBtn.addEventListener('click', solveAndDraw);
 window.addEventListener('load', solveAndDraw);
 
+/* ---------- hoofdloop ---------- */
+
 function solveAndDraw() {
   const {nodes, segments, chains} = parseInput(textarea.value);
   if (nodes.length === 0) return;
-  leastSquaresLayout(nodes, segments, chains);
+  runLeastSquares(nodes, segments, chains);
   renderSVG(nodes, segments);
 }
 
-/* ---------- PARSING ---------- */
+/* ---------- parsing ---------- */
 
 function parseInput(text) {
   const nodeMap = new Map();
@@ -59,19 +62,19 @@ function parseInput(text) {
     if (!nodeMap.has(key)) {
       nodeMap.set(key, {
         id: key,
-        x: Math.random()*2 - 1,
-        y: Math.random()*2 - 1,
-        fixed: false,
+        x: 0, y: 0,
         lineId: null,
-        t: 0  // parameter langs lijn
+        t: 0      // parameter langs de lijn
       });
     }
     return nodeMap.get(key);
   }
 
   lines.forEach((line, lineIndex) => {
-    // splits op connectoren, houdt connectoren als aparte tokens
-    const tokens = line.split(/(\s*--\s*|-gebouw-\s*)/).map(t => t.trim()).filter(t => t.length);
+    // splits op connectoren, houdt connector als aparte token
+    const tokens = line.split(/(\s*--\s*|-gebouw-\s*)/i)
+                       .map(t => t.trim())
+                       .filter(t => t.length);
     const lineNodes = [];
     const lineSegs = [];
 
@@ -95,12 +98,18 @@ function parseInput(text) {
       segments.push(seg);
       lineSegs.push(seg);
     }
+
     if (lineNodes.length) {
-      chains.push({lineId: lineIndex, nodes: Array.from(new Set(lineNodes)), segments: lineSegs});
+      chains.push({
+        lineId: lineIndex,
+        nodes: Array.from(new Set(lineNodes)),
+        segments: lineSegs
+      });
     }
   });
 
-  return {nodes: Array.from(nodeMap.values()), segments, chains};
+  const nodes = Array.from(nodeMap.values());
+  return {nodes, segments, chains};
 }
 
 function parseNodeToken(raw, getNode) {
@@ -113,29 +122,30 @@ function parseNodeToken(raw, getNode) {
     if (!isNaN(xs) && !isNaN(ys)) {
       node.x = xs;
       node.y = ys;
-      node.fixed = true;
     }
   }
   return node;
 }
 
-/* ---------- LEAST SQUARES / CONSTRAINTS ---------- */
+/* ---------- LSQ layout ---------- */
 
-function leastSquaresLayout(nodes, segments, chains) {
-  if (nodes.length === 0) return;
+/*
+  Per lijn:
+  - vaste parameters t_i (langs 1D-keten) → afstandsomloop
+  - variabelen: p0 = (x0,y0) en u = (ux,uy) met |u|=1
+  Puntcoördinaat op lijn: P_i = p0 + t_i * u
+  Daarnaast kleine "rest-vector" (dx_i,dy_i) per punt zodat
+  verbindingen tussen lijnen meegenomen kunnen worden.
+*/
 
-  // indices voor variabelen
-  const idxMap = new Map();
-  nodes.forEach((n, i) => idxMap.set(n.id, i));
-
-  // 1. init t (1D coördinaat langs elke lijn) op basis van cumulatieve afstand
+function runLeastSquares(nodes, segments, chains) {
+  // 1. t_i per lijn opbouwen
   chains.forEach(chain => {
     const order = buildOrder(chain);
     let cum = 0;
     order.forEach((n, i) => {
-      if (i === 0) {
-        n.t = 0;
-      } else {
+      if (i === 0) { n.t = 0; cum = 0; }
+      else {
         const prev = order[i-1];
         const seg = chain.segments.find(
           s => (s.from === prev && s.to === n) || (s.to === prev && s.from === n)
@@ -146,99 +156,147 @@ function leastSquaresLayout(nodes, segments, chains) {
     });
   });
 
-  // 2. initialiseer per lijn een richtingvector (unit-vector)
-  const lineDirs = new Map(); // lineId -> {ux, uy}
+  // 2. lijnvariabelen initialiseren
+  const lineParams = new Map();  // lineId -> {x0,y0,ux,uy}
   chains.forEach((chain, k) => {
-    const angle = k * Math.PI/5; // spreiding
-    lineDirs.set(chain.lineId, {ux: Math.cos(angle), uy: Math.sin(angle)});
+    const angle = k * Math.PI / 4;
+    lineParams.set(chain.lineId, {
+      x0: 0,
+      y0: k * 10,           // beetje verticaal uit elkaar
+      ux: Math.cos(angle),
+      uy: Math.sin(angle)
+    });
   });
 
-  // 3. fixeer referentie: eerste node op (0,0), tweede op x-as
-  const base = nodes[0];
-  base.x = 0; base.y = 0; base.fixed = true;
-  let second = nodes.find(n => n !== base);
-  if (!second) second = base;
-  second.x = 10; second.y = 0; second.fixed = true;
+  // 3. restvector per node
+  nodes.forEach(n => { n.rx = 0; n.ry = 0; });
 
-  // 4. iteratieve LSQ: pas coördinaten en richtingen aan
-  const iters = 300;
-  const step = 0.01;
+  // 4. referentie vastzetten (globale translatie/rotatie opheffen)
+  const base = nodes[0];
+  base.rx = 0; base.ry = 0;
+  const baseLine = chains.find(c => c.lineId === base.lineId);
+  if (baseLine) {
+    const lp = lineParams.get(baseLine.lineId);
+    lp.x0 = 0;
+    lp.y0 = 0;
+  }
+
+  // 5. iteratieve optimalisatie
+  const iters = 400;
+  const stepLine = 0.01;
+  const stepRest = 0.02;
 
   for (let it = 0; it < iters; it++) {
-    // forces reset
-    const fx = new Array(nodes.length).fill(0);
-    const fy = new Array(nodes.length).fill(0);
-    const dux = new Map(); const duy = new Map();
-    lineDirs.forEach((_, lid) => { dux.set(lid, 0); duy.set(lid, 0); });
+    // gradient-accu's voor lijnparameters
+    const dLine = new Map(); // lineId -> {dx0,dy0,dux,duy}
+    lineParams.forEach((_, lid) => dLine.set(lid, {dx0:0,dy0:0,dux:0,duy:0}));
 
-    // 4a. lijn-collineariteit + t-projectie
-    chains.forEach(chain => {
-      const dir = lineDirs.get(chain.lineId);
-      const ux = dir.ux, uy = dir.uy;
-
-      chain.nodes.forEach(n => {
-        const i = idxMap.get(n.id);
-        // gewenste positie op lijn: p0 + t*dir
-        // neem eerste node van lijn als p0
-        const p0 = chain.nodes[0];
-        const j = idxMap.get(p0.id);
-        const x0 = nodes[j].x, y0 = nodes[j].y;
-
-        const tx = x0 + n.t * ux;
-        const ty = y0 + n.t * uy;
-
-        const ex = nodes[i].x - tx;
-        const ey = nodes[i].y - ty;
-
-        fx[i] -= ex * 0.5;
-        fy[i] -= ey * 0.5;
-
-        // kleine correctie op richtingvector
-        const d_ux = -(ex * n.t);
-        const d_uy = -(ey * n.t);
-        dux.set(chain.lineId, dux.get(chain.lineId) + d_ux * 0.0005);
-        duy.set(chain.lineId, duy.get(chain.lineId) + d_uy * 0.0005);
-      });
-    });
-
-    // 4b. afstandsvergelijkingen
+    // 5a. afstandsvergelijkingen voor alle segmenten
     segments.forEach(seg => {
       if (!seg.dist) return;
       const a = seg.from, b = seg.to;
-      const ia = idxMap.get(a.id), ib = idxMap.get(b.id);
-      const dx = nodes[ib].x - nodes[ia].x;
-      const dy = nodes[ib].y - nodes[ia].y;
+
+      const pa = pointPos(a, lineParams);
+      const pb = pointPos(b, lineParams);
+
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
       const d = Math.sqrt(dx*dx + dy*dy) || 1e-6;
-      const err = d - seg.dist;
-      const w = 0.8;
+      const err = d - seg.dist;          // positief = te lang
+      const w = 1.0;
 
-      const ex = w * err * (dx/d);
-      const ey = w * err * (dy/d);
+      const grad = w * err / d;
+      const gx = grad * dx;
+      const gy = grad * dy;
 
-      fx[ia] += ex;
-      fy[ia] += ey;
-      fx[ib] -= ex;
-      fy[ib] -= ey;
+      // restvector-updates (lokale correctie)
+      a.rx += gx * stepRest;
+      a.ry += gy * stepRest;
+      b.rx -= gx * stepRest;
+      b.ry -= gy * stepRest;
+
+      // lijnparameter-updates
+      [a, b].forEach(signNode => {
+        const lid = signNode.lineId;
+        if (lid == null) return;
+        const lp = lineParams.get(lid);
+        const acc = dLine.get(lid);
+
+        // afgeleide t.o.v. x0,y0: punt verschuift mee met lijn
+        const sign = (signNode === a) ? -1 : 1; // ruwe verdeling
+        acc.dx0 += sign * gx * stepLine;
+        acc.dy0 += sign * gy * stepLine;
+
+        // afgeleide t.o.v. u: P = p0 + t*u  => dP/du = t * I
+        acc.dux += sign * gx * signNode.t * stepLine;
+        acc.duy += sign * gy * signNode.t * stepLine;
+      });
     });
 
-    // 4c. update richtingen
-    lineDirs.forEach((dir, lid) => {
-      let ux = dir.ux + dux.get(lid);
-      let uy = dir.uy + duy.get(lid);
-      const len = Math.sqrt(ux*ux + uy*uy) || 1;
-      lineDirs.set(lid, {ux: ux/len, uy: uy/len});
+    // 5b. collineariteit afdwingen: punten dicht bij hun lijn houden
+    chains.forEach(chain => {
+      const lp = lineParams.get(chain.lineId);
+      const acc = dLine.get(chain.lineId);
+      const {ux, uy} = lp;
+
+      chain.nodes.forEach(n => {
+        const ideal = {
+          x: lp.x0 + n.t * ux,
+          y: lp.y0 + n.t * uy
+        };
+        const p = pointPos(n, lineParams);
+        const ex = p.x - ideal.x;
+        const ey = p.y - ideal.y;
+
+        // restvector terugtrekken naar lijn
+        n.rx -= ex * 0.1;
+        n.ry -= ey * 0.1;
+
+        // lijn verschuiven (p0)
+        acc.dx0 += ex * 0.001;
+        acc.dy0 += ey * 0.001;
+      });
     });
 
-    // 4d. update coördinaten
-    nodes.forEach((n, i) => {
-      if (n.fixed) return;
-      n.x -= step * fx[i];
-      n.y -= step * fy[i];
+    // 5c. lijnparameters bijwerken + u normaliseren
+    lineParams.forEach((lp, lid) => {
+      const acc = dLine.get(lid);
+      lp.x0 -= acc.dx0;
+      lp.y0 -= acc.dy0;
+      lp.ux -= acc.dux;
+      lp.uy -= acc.duy;
+      const len = Math.sqrt(lp.ux*lp.ux + lp.uy*lp.uy) || 1;
+      lp.ux /= len;
+      lp.uy /= len;
     });
+
+    // referentielijn opnieuw verankeren (optioneel: verstrakken)
+    if (baseLine) {
+      const lp = lineParams.get(baseLine.lineId);
+      lp.x0 = 0;
+      lp.y0 = 0;
+    }
   }
+
+  // 6. uiteindelijke coördinaten uit lijn + restvector
+  nodes.forEach(n => {
+    const p = pointPos(n, lineParams);
+    n.x = p.x;
+    n.y = p.y;
+  });
 }
 
-// bouw orde langs een lijn (eenvoudige keten)
+// positie van een node uit lijnparameters + restvector
+function pointPos(n, lineParams) {
+  const lp = lineParams.get(n.lineId);
+  if (!lp) return {x: n.rx, y: n.ry};
+  return {
+    x: lp.x0 + n.t * lp.ux + n.rx,
+    y: lp.y0 + n.t * lp.uy + n.ry
+  };
+}
+
+// lineaire volgorde langs keten bepalen (eenvoudig)
 function buildOrder(chain) {
   if (!chain.segments.length) return chain.nodes;
   const adj = new Map();
@@ -247,31 +305,31 @@ function buildOrder(chain) {
     adj.get(s.from).push(s.to);
     adj.get(s.to).push(s.from);
   });
-  // zoek een eindpunt (degree 1) als start
   let start = chain.nodes[0];
   for (const n of chain.nodes) {
     if (adj.get(n).length === 1) { start = n; break; }
   }
   const order = [start];
   const visited = new Set([start]);
-  let current = start;
+  let cur = start;
   while (true) {
-    const next = adj.get(current).find(n => !visited.has(n));
-    if (!next) break;
-    order.push(next);
-    visited.add(next);
-    current = next;
+    const nxt = adj.get(cur).find(n => !visited.has(n));
+    if (!nxt) break;
+    order.push(nxt);
+    visited.add(nxt);
+    cur = nxt;
   }
   return order;
 }
 
-/* ---------- SVG RENDER ---------- */
+/* ---------- SVG ---------- */
 
 function renderSVG(nodes, segments) {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
   const xs = nodes.map(n => n.x);
   const ys = nodes.map(n => n.y);
+  if (!xs.length) return;
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const pad = 5;
@@ -282,13 +340,12 @@ function renderSVG(nodes, segments) {
   // segmenten
   segments.forEach(seg => {
     const a = seg.from, b = seg.to;
-    if (a.x == null || b.x == null) return;
     const line = document.createElementNS('http://www.w3.org/2000/svg','line');
     line.setAttribute('x1', a.x);
     line.setAttribute('y1', a.y);
     line.setAttribute('x2', b.x);
     line.setAttribute('y2', b.y);
-    line.setAttribute('class', 'segment ' + (seg.type==='gebouw'?'segment-gebouw':'segment-default'));
+    line.setAttribute('class', 'segment ' + (seg.type==='gebouw' ? 'segment-gebouw' : 'segment-default'));
     svg.appendChild(line);
 
     if (seg.dist != null) {
@@ -296,7 +353,7 @@ function renderSVG(nodes, segments) {
       const my = (a.y + b.y)/2;
       const t = document.createElementNS('http://www.w3.org/2000/svg','text');
       t.setAttribute('x', mx);
-      t.setAttribute('y', my-1);
+      t.setAttribute('y', my - 1);
       t.setAttribute('class','distance-label');
       t.textContent = seg.dist.toFixed(2);
       svg.appendChild(t);
