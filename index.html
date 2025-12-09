@@ -220,22 +220,82 @@ function layoutChainsStrict(nodes, segments, chains) {
     order.forEach(node => {
       if (node.fixed) return;
       const t = node.tempPos * idealScale;
-      node.x = t * Math.cos(baseAngle) + chainOffsetY * 0.1;
-      node.y = t * Math.sin(baseAngle);
+      node.x = t * Math.cos(baseAngle);
+      node.y = t * Math.sin(baseAngle) + chainOffsetY;
       node.chainAngle = baseAngle;
     });
   });
 
-  // Stap 2: Beweeg KETENS als GEHEEL (hergebruik EXACTE volgorde)
+  // Stap 2: Globale optimalisatie - BEWEG KETENS ALS GEHEEL
   const iterations = 200;
+  const chainForces = new Map(); // DEFINIEER HIER!
+  
   for (let it = 0; it < iterations; it++) {
-    // ... (krachten berekenen blijft hetzelfde)
+    // Reset chain forces
+    chainForces.clear();
+    chains.forEach(chain => chainForces.set(chain, {fx: 0, fy: 0}));
 
-    // Herplaats via BEWARENDE volgorde
-    chains.forEach(chain => {
+    // Krachten tussen alle nodes berekenen
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i];
+        const b = nodes[j];
+        if (a.x == null || b.x == null) continue;
+
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dist2 = dx * dx + dy * dy + 0.1;
+        let force = 100 / dist2;
+        dx /= Math.sqrt(dist2);
+        dy /= Math.sqrt(dist2);
+
+        // Voeg toe aan chain forces
+        if (a.chainId != null && chains[a.chainId]) {
+          const fa = chainForces.get(chains[a.chainId]);
+          fa.fx += dx * force * 0.5;
+          fa.fy += dy * force * 0.5;
+        }
+        if (b.chainId != null && chains[b.chainId] && b.chainId !== a.chainId) {
+          const fb = chainForces.get(chains[b.chainId]);
+          fb.fx -= dx * force * 0.5;
+          fb.fy -= dy * force * 0.5;
+        }
+      }
+    }
+
+    // Afstanden respecteren (tussen verschillende ketens)
+    for (const seg of segments) {
+      const a = seg.from;
+      const b = seg.to;
+      if (a.chainId === b.chainId || a.x == null || b.x == null) continue;
+
+      const target = seg.dist ? seg.dist * idealScale : null;
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      dx /= dist;
+      dy /= dist;
+      let desired = target || dist;
+      let delta = dist - desired;
+      let force = 0.6 * delta;
+
+      if (a.chainId != null && chains[a.chainId]) {
+        const fa = chainForces.get(chains[a.chainId]);
+        fa.fx += dx * force;
+        fa.fy += dy * force;
+      }
+      if (b.chainId != null && chains[b.chainId]) {
+        const fb = chainForces.get(chains[b.chainId]);
+        fb.fx -= dx * force;
+        fb.fy -= dy * force;
+      }
+    }
+
+    // Beweeg KETENS als geheel (hergebruik EXACTE volgorde)
+    chains.forEach((chain) => {
       if (!chain.order) return;
       
-      // Center of mass
+      // Centre of mass
       let cx = 0, cy = 0, count = 0;
       chain.order.forEach(n => {
         if (n.x != null && !n.fixed) {
@@ -245,10 +305,10 @@ function layoutChainsStrict(nodes, segments, chains) {
       if (count === 0) return;
       cx /= count; cy /= count;
 
-      // Nieuwe hoek/positie voor hele keten
-      const rotForce = Math.atan2(chainForces.get(chain)?.fy || 0, chainForces.get(chain)?.fx || 0) * 0.02;
-      const newAngle = chain.order[0].chainAngle + rotForce;
-      
+      const force = chainForces.get(chain);
+      const rotForce = Math.atan2(force.fy, force.fx) * 0.02;
+      const newAngle = chain.order[0]?.chainAngle || 0 + rotForce;
+
       // HERPLAATS EXACT langs lijn via opgeslagen volgorde
       chain.order.forEach((node, i) => {
         if (node.fixed) return;
