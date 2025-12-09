@@ -77,15 +77,14 @@ P7 -- P4 [5]"></textarea>
     textarea.addEventListener('input', () => {
       const text = textarea.value;
       const {nodes, segments, chains} = parseInput(text);
-      layoutChains(nodes, segments, chains);
+      layoutChainsStrict(nodes, segments, chains);
       render(nodes, segments);
     });
 
-    // Parsing retourneert nu ook chains (per regel)
     function parseInput(text) {
       const nodeMap = new Map();
       const segments = [];
-      const chains = []; // per invoerregel
+      const chains = [];
 
       function getNode(id) {
         const key = id.toUpperCase();
@@ -95,9 +94,8 @@ P7 -- P4 [5]"></textarea>
             x: null,
             y: null,
             fixed: false,
-            vx: 0,
-            vy: 0,
-            chainId: null
+            chainId: null,
+            chainAngle: 0
           });
         }
         return nodeMap.get(key);
@@ -170,17 +168,17 @@ P7 -- P4 [5]"></textarea>
       return node;
     }
 
-    // Nieuwe layout: rechte ketens met ruis + 2D relaxatie
-    function layoutChains(nodes, segments, chains) {
+    // STRICT: binnen keten PERFECT recht, alleen ketens bewegen/rotëren als geheel
+    function layoutChainsStrict(nodes, segments, chains) {
       if (nodes.length === 0) return;
 
       const idealScale = 5;
 
-      // Stap 1: Plaats elke keten recht met cumulatieve afstand + verticale ruis
+      // Stap 1: Per keten PERFECT rechte lijn maken met exacte afstanden
       chains.forEach((chain, chainIndex) => {
         if (chain.nodes.length === 0) return;
 
-        // Bepaal volgorde in keten
+        // Bepaal volgorde
         const order = [];
         if (chain.segments.length > 0) {
           let current = chain.segments[0].from;
@@ -196,75 +194,77 @@ P7 -- P4 [5]"></textarea>
           }
         }
 
-        // Cumulatieve posities
+        // Cumulatieve afstanden (exact!)
         let cum = 0;
-        order[0].tempPos = 0;
-        for (let i = 1; i < order.length; i++) {
-          const prev = order[i - 1];
-          const cur = order[i];
-          const seg = chain.segments.find(s =>
-            (s.from === prev && s.to === cur) || (s.to === prev && s.from === cur));
-          cum += seg?.dist || 1;
-          cur.tempPos = cum;
-        }
+        order.forEach((node, i) => {
+          if (i === 0) {
+            node.tempPos = 0;
+            cum = 0;
+          } else {
+            const prev = order[i - 1];
+            const seg = chain.segments.find(s =>
+              (s.from === prev && s.to === node) || (s.to === prev && s.from === node));
+            cum += seg?.dist || 1;
+            node.tempPos = cum;
+          }
+        });
 
-        // Richting met verticale spreiding
-        const baseAngle = (chainIndex * Math.PI * 0.4) % (Math.PI * 2); // verschillende hoeken
-        const spreadY = chainIndex * 8; // verticale offset per keten
+        // Iedere keten krijgt unieke hoek + verticale offset
+        const baseAngle = (chainIndex * 0.6) + 0.3; // verschillende oriëntaties
+        const chainOffsetY = chainIndex * 15;
 
-        for (const node of order) {
-          if (node.fixed) continue;
+        // ZET POSITIES EXACT langs rechte lijn
+        order.forEach(node => {
+          if (node.fixed) return; // behoud vaste coördinaten
           const t = (node.tempPos || 0) * idealScale;
-          node.x = t * Math.cos(baseAngle) + (Math.random() - 0.5) * 2;
-          node.y = t * Math.sin(baseAngle) + spreadY + (Math.random() - 0.5) * 3;
-          node.vx = 0;
-          node.vy = 0;
-        }
+          node.x = t * Math.cos(baseAngle);
+          node.y = t * Math.sin(baseAngle) + chainOffsetY;
+          node.chainAngle = baseAngle; // onthoud voor later
+        });
       });
 
-      // Stap 2: Sterke 2D force-directed relaxatie
-      const iterations = 300; // meer iteraties voor goede spreiding
-      const repulsion = 80;
-      const springK = 0.8;
-      const damping = 0.88;
-
+      // Stap 2: Globale optimalisatie - BEWEG KETENS ALS GEHEEL, geen vervorming
+      const iterations = 200;
+      const chainForces = new Map(); // per keten: totale fx,fy voor rotatie/verschuiving
+      
       for (let it = 0; it < iterations; it++) {
-        // Demping
-        for (const n of nodes) {
-          if (!n.fixed) {
-            n.vx *= damping;
-            n.vy *= damping;
-          }
-        }
+        // Reset chain forces
+        chainForces.clear();
+        chains.forEach(chain => chainForces.set(chain, {fx: 0, fy: 0}));
 
-        // Afstoting alle paren
+        // Krachten tussen alle nodes berekenen
         for (let i = 0; i < nodes.length; i++) {
           for (let j = i + 1; j < nodes.length; j++) {
             const a = nodes[i];
             const b = nodes[j];
-            let dx = a.x - b.x;
-            let dy = a.y - b.y;
-            let dist2 = dx * dx + dy * dy + 0.01;
-            let force = repulsion / dist2;
+            if (a.x == null || b.x == null) continue;
+
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let dist2 = dx * dx + dy * dy + 0.1;
+            let force = 100 / dist2;
             dx /= Math.sqrt(dist2);
             dy /= Math.sqrt(dist2);
 
-            if (!a.fixed) {
-              a.vx += dx * force;
-              a.vy += dy * force;
+            // Voeg toe aan chain forces (gemiddeld per keten)
+            if (a.chainId != null) {
+              const fa = chainForces.get(chains[a.chainId]);
+              fa.fx += dx * force * 0.5;
+              fa.fy += dy * force * 0.5;
             }
-            if (!b.fixed) {
-              b.vx -= dx * force;
-              b.vy -= dy * force;
+            if (b.chainId != null && b.chainId !== a.chainId) {
+              const fb = chainForces.get(chains[b.chainId]);
+              fb.fx -= dx * force * 0.5;
+              fb.fy -= dy * force * 0.5;
             }
           }
         }
 
-        // Verbindingen (afstanden respecteren)
+        // Afstanden respecteren (tussen verschillende ketens)
         for (const seg of segments) {
           const a = seg.from;
           const b = seg.to;
-          if (a.x == null || b.x == null) continue;
+          if (a.chainId === b.chainId || a.x == null || b.x == null) continue;
 
           const target = seg.dist ? seg.dist * idealScale : null;
           let dx = b.x - a.x;
@@ -272,27 +272,57 @@ P7 -- P4 [5]"></textarea>
           let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
           dx /= dist;
           dy /= dist;
-
           let desired = target || dist;
           let delta = dist - desired;
-          let force = springK * delta;
+          let force = 0.6 * delta;
 
-          if (!a.fixed) {
-            a.vx += dx * force;
-            a.vy += dy * force;
+          if (a.chainId != null) {
+            const fa = chainForces.get(chains[a.chainId]);
+            fa.fx += dx * force;
+            fa.fy += dy * force;
           }
-          if (!b.fixed) {
-            b.vx -= dx * force;
-            b.vy -= dy * force;
+          if (b.chainId != null) {
+            const fb = chainForces.get(chains[b.chainId]);
+            fb.fx -= dx * force;
+            fb.fy -= dy * force;
           }
         }
 
-        // Update posities
-        for (const n of nodes) {
-          if (n.fixed) continue;
-          n.x += n.vx * 0.15;
-          n.y += n.vy * 0.15;
-        }
+        // Beweeg KETENS als geheel (rotatie + translatie)
+        chains.forEach((chain, chainIndex) => {
+          const force = chainForces.get(chain);
+          if (chain.nodes.length === 0) return;
+
+          // Centre of mass berekenen
+          let cx = 0, cy = 0, count = 0;
+          chain.nodes.forEach(n => {
+            if (n.x != null && !n.fixed) {
+              cx += n.x;
+              cy += n.y;
+              count++;
+            }
+          });
+          if (count === 0) return;
+          cx /= count;
+          cy /= count;
+
+          // Rotatie rond center (kleine hoekwijziging)
+          const rotForce = Math.atan2(force.fy, force.fx) * 0.02;
+          const newAngle = chainIndex * 0.6 + rotForce;
+
+          // Translatie
+          const tx = force.fx * 0.1;
+          const ty = force.fy * 0.1;
+
+          // Herplaats alle nodes langs nieuwe rechte lijn
+          chain.nodes.forEach(node => {
+            if (node.fixed) return;
+            const t = (node.tempPos || 0) * idealScale;
+            node.x = cx + tx + t * Math.cos(newAngle);
+            node.y = cy + ty + t * Math.sin(newAngle);
+            node.chainAngle = newAngle;
+          });
+        });
       }
     }
 
@@ -315,7 +345,7 @@ P7 -- P4 [5]"></textarea>
       svg.setAttribute('viewBox',
         [minX - pad, minY - pad, width + 2 * pad, height + 2 * pad].join(' '));
 
-      // Segmenten
+      // Segmenten (altijd perfect recht binnen keten)
       for (const seg of segments) {
         const a = seg.from, b = seg.to;
         if (a.x == null || b.x == null) continue;
