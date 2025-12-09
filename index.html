@@ -185,27 +185,94 @@ P1 -gebouw- P2 [5.40] -gebouw- P3 [8.83]"></textarea>
     function layoutNodes(nodes, segments) {
       if (nodes.length === 0) return;
 
-      // init: zet niet-vaste nodes op cirkel
-      const radius = 10;
-      let angleStep = (2 * Math.PI) / Math.max(1, nodes.length);
-      let k = 0;
-      for (const n of nodes) {
-        if (n.fixed && n.x != null && n.y != null) continue;
-        n.x = radius * Math.cos(k * angleStep);
-        n.y = radius * Math.sin(k * angleStep);
-        n.vx = 0;
-        n.vy = 0;
-        k++;
+      // 1. Zet per regel een rechte lijn op basis van afstand
+      //    We reconstrueren hier ketens per invoerregel opnieuw.
+      const text = textarea.value;
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+
+      const used = new Set(); // nodes die al een positie krijgen via een rechte lijn
+
+      for (const line of lines) {
+        // hergebruik dezelfde parsing als eerder, maar alleen voor deze lijn
+        const {nodes: lineNodes, segments: lineSegs} = parseInput(line);
+
+        if (lineNodes.length === 0) continue;
+
+        // bepaal volgorde langs de lijn uit de segmenten
+        // we nemen de eerste segmentketen als volgorde
+        const order = [];
+        if (lineSegs.length > 0) {
+          let current = lineSegs[0].from;
+          order.push(current);
+          for (const seg of lineSegs) {
+            if (seg.from === current && !order.includes(seg.to)) {
+              order.push(seg.to);
+              current = seg.to;
+            }
+          }
+        } else {
+          // geen segmenten (alleen losse punten op de regel)
+          order.push(...lineNodes);
+        }
+
+        // afstandscumulatie langs de lijn
+        const posMap = new Map();
+        let cum = 0;
+        posMap.set(order[0].id, 0);
+        for (let i = 1; i < order.length; i++) {
+          const prev = order[i - 1];
+          const cur = order[i];
+          const seg = lineSegs.find(s =>
+            (s.from === prev && s.to === cur) || (s.to === prev && s.from === cur)
+          );
+          if (seg && seg.dist != null) {
+            cum += seg.dist;
+          } else {
+            cum += 1; // fallback: 1 eenheid als er geen afstand is
+          }
+          posMap.set(cur.id, cum);
+        }
+
+        // schaalfactor voor deze regel
+        const idealScale = 5;
+        const angle = 0; // allemaal horizontaal; later met rotatie/force t.o.v. andere lijnen
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+
+        for (const n of lineNodes) {
+          const key = n.id.toUpperCase();
+          const master = nodes.find(nn => nn.id === key);
+          if (!master) continue;
+
+          const t = (posMap.get(n.id) || 0) * idealScale;
+          if (!master.fixed) {
+            master.x = t * cosA;
+            master.y = t * sinA;
+            used.add(master.id);
+          }
+        }
       }
 
-      const iterations = 150;
-      const repulsion = 50;      // sterkte afstoot
-      const springK = 0.5;       // veer-constante langs segmenten
-      const idealScale = 5;      // schaal: 1 eenheid afstand -> 5 units in tekening
-      const damping = 0.85;      // demping snelheid
+      // 2. Voor nodes die nog geen positie hebben: cirkel-initialisatie
+      const radius = 10;
+      let freeNodes = nodes.filter(n => !used.has(n.id) && !n.fixed);
+      let angleStep = (2 * Math.PI) / Math.max(1, freeNodes.length);
+      freeNodes.forEach((n, i) => {
+        n.x = radius * Math.cos(i * angleStep);
+        n.y = radius * Math.sin(i * angleStep);
+        n.vx = 0;
+        n.vy = 0;
+      });
+
+      // 3. Korte relaxatie met afstoot + veer op segmenten (zoals eerder),
+      //    maar met minder iteraties zodat de rechte lijnen grotendeels recht blijven.
+      const iterations = 60;
+      const repulsion = 50;
+      const springK = 0.5;
+      const idealScale = 5;
+      const damping = 0.85;
 
       for (let it = 0; it < iterations; it++) {
-        // reset snelheid op basis van krachten
         for (const n of nodes) {
           if (!n.fixed) {
             n.vx *= damping;
@@ -213,7 +280,7 @@ P1 -gebouw- P2 [5.40] -gebouw- P3 [8.83]"></textarea>
           }
         }
 
-        // afstotende kracht tussen alle paren
+        // afstoot
         for (let i = 0; i < nodes.length; i++) {
           for (let j = i + 1; j < nodes.length; j++) {
             const a = nodes[i];
@@ -225,46 +292,29 @@ P1 -gebouw- P2 [5.40] -gebouw- P3 [8.83]"></textarea>
             let force = repulsion / dist2;
             dx /= dist;
             dy /= dist;
-
-            if (!a.fixed) {
-              a.vx += dx * force;
-              a.vy += dy * force;
-            }
-            if (!b.fixed) {
-              b.vx -= dx * force;
-              b.vy -= dy * force;
-            }
+            if (!a.fixed) { a.vx += dx * force; a.vy += dy * force; }
+            if (!b.fixed) { b.vx -= dx * force; b.vy -= dy * force; }
           }
         }
 
-        // veer-krachten op segmenten (benaderen opgegeven afstand)
+        // veren
         for (const seg of segments) {
           const a = seg.from;
           const b = seg.to;
           if (a.x == null || b.x == null) continue;
-
           const target = seg.dist != null ? seg.dist * idealScale : null;
           let dx = b.x - a.x;
           let dy = b.y - a.y;
           let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
           dx /= dist;
           dy /= dist;
-
-          let desired = target || dist; // als geen afstand: behoud huidige
+          let desired = target || dist;
           let delta = dist - desired;
           let force = springK * delta;
-
-          if (!a.fixed) {
-            a.vx += dx * force;
-            a.vy += dy * force;
-          }
-          if (!b.fixed) {
-            b.vx -= dx * force;
-            b.vy -= dy * force;
-          }
+          if (!a.fixed) { a.vx += dx * force; a.vy += dy * force; }
+          if (!b.fixed) { b.vx -= dx * force; b.vy -= dy * force; }
         }
 
-        // posities bijwerken
         for (const n of nodes) {
           if (n.fixed) continue;
           n.x += n.vx * 0.1;
