@@ -64,7 +64,7 @@
 placeholder="Voorbeeld:
 P1 -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
 P1 -- P5 [0.4] -gebouw- P6 [10.55] -- P7 [11.8]
-P7 -- P4 [5]"></textarea>
+P7 -- P4 [25]"></textarea>
   </div>
   <div id="right">
     <svg id="viewBox" viewBox="0 0 100 100"></svg>
@@ -95,7 +95,8 @@ P7 -- P4 [5]"></textarea>
             y: null,
             fixed: false,
             chainId: null,
-            chainAngle: 0
+            chainAngle: 0,
+            tempPos: 0
           });
         }
         return nodeMap.get(key);
@@ -105,6 +106,7 @@ P7 -- P4 [5]"></textarea>
         .map(l => l.trim())
         .filter(l => l.length > 0);
 
+      // Parse individuele chains per regel
       lines.forEach((line, lineIndex) => {
         const rawParts = line.split(/(-gebouw-)|(--)/i).filter(p => p && p.trim() !== '');
         const tokens = [];
@@ -144,11 +146,46 @@ P7 -- P4 [5]"></textarea>
           lineSegs.push({from: nodeA, to: nodeB, dist, type: segType});
           segments.push({from: nodeA, to: nodeB, dist, type: segType});
         }
-        chains.push({nodes: [...new Set(lineNodes)], segments: lineSegs});
+        if (lineNodes.length > 0) {
+          chains.push({nodes: [...new Set(lineNodes)], segments: lineSegs, lineIndex});
+        }
       });
 
       const nodes = Array.from(nodeMap.values());
-      return {nodes, segments, chains};
+      
+      // MERGE chains die overlappen via gedeelde nodes
+      const mergedChains = [];
+      const visited = new Set();
+      chains.forEach((chain, i) => {
+        if (visited.has(i)) return;
+        const superChain = {
+          nodes: [...chain.nodes],
+          segments: [...chain.segments],
+          subchains: [chain]
+        };
+        visited.add(i);
+        
+        // Recursief alle overlappende chains toevoegen
+        function expand(currentChain) {
+          chains.forEach((other, j) => {
+            if (visited.has(j)) return;
+            const overlap = currentChain.nodes.some(n => other.nodes.includes(n));
+            if (overlap) {
+              visited.add(j);
+              superChain.nodes.push(...other.nodes);
+              superChain.segments.push(...other.segments);
+              superChain.subchains.push(other);
+              expand(other);
+            }
+          });
+        }
+        expand(chain);
+        
+        superChain.nodes = [...new Set(superChain.nodes)];
+        mergedChains.push(superChain);
+      });
+      
+      return {nodes, segments, chains: mergedChains};
     }
 
     function parseNodeToken(raw, getNode) {
@@ -168,159 +205,159 @@ P7 -- P4 [5]"></textarea>
       return node;
     }
 
-    // STRICT: binnen keten PERFECT recht, alleen ketens bewegen/rotëren als geheel
-function layoutChainsStrict(nodes, segments, chains) {
-  if (nodes.length === 0) return;
+    function layoutChainsStrict(nodes, segments, chains) {
+      if (nodes.length === 0) return;
+      const idealScale = 5;
 
-  const idealScale = 5;
+      // Stap 1: Per subchain PERFECT rechte lijn maken
+      chains.forEach((superChain, superIndex) => {
+        superChain.subchains.forEach((chain) => {
+          if (chain.nodes.length === 0) return;
 
-  // Stap 1: Per keten PERFECT rechte lijn + SLA OP EXPLICIETE VOLGORDE OP
-  chains.forEach((chain, chainIndex) => {
-    if (chain.nodes.length === 0) return;
+          // Expliciete lineaire volgorde
+          let order = [];
+          if (chain.segments.length > 0) {
+            let current = chain.segments[0].from;
+            order = [current];
+            for (const seg of chain.segments) {
+              const nextNode = seg.from === current ? seg.to : seg.from;
+              if (!order.includes(nextNode)) {
+                order.push(nextNode);
+                current = nextNode;
+              }
+            }
+          } else {
+            order = chain.nodes;
+          }
+          
+          chain.order = order;
 
-    // EXPLICIETE lineaire volgorde construeren uit segments
-    const orderMap = new Map(); // node -> index in keten
-    let order = [];
-    
-    // Start vanaf eerste node, bouw lineair voort
-    let startNode = chain.segments[0]?.from || chain.nodes[0];
-    order = [startNode];
-    orderMap.set(startNode, 0);
-    
-    for (let i = 0; i < chain.segments.length; i++) {
-      const seg = chain.segments[i];
-      const nextNode = seg.from === order[order.length-1] ? seg.to : seg.from;
-      if (!order.includes(nextNode)) {
-        order.push(nextNode);
-        orderMap.set(nextNode, order.length-1);
-      }
-    }
-    
-    chain.order = order; // OPSLAAN!
-    chain.orderMap = orderMap;
+          // Cumulatieve afstanden (exact!)
+          let cum = 0;
+          order.forEach((node, i) => {
+            if (i === 0) {
+              node.tempPos = 0;
+              cum = 0;
+            } else {
+              const prev = order[i - 1];
+              const seg = chain.segments.find(s =>
+                (s.from === prev && s.to === node) || (s.to === prev && s.from === node));
+              cum += seg?.dist || 1;
+              node.tempPos = cum;
+            }
+          });
 
-    // Cumulatieve afstanden (exact!)
-    let cum = 0;
-    order.forEach((node, i) => {
-      if (i === 0) {
-        node.tempPos = 0;
-        cum = 0;
-      } else {
-        const prev = order[i - 1];
-        const seg = chain.segments.find(s =>
-          (s.from === prev && s.to === node) || (s.to === prev && s.from === node));
-        cum += seg?.dist || 1;
-        node.tempPos = cum;
-      }
-    });
-
-    // Initiële plaatsing
-    const baseAngle = chainIndex * 0.6;
-    const chainOffsetY = chainIndex * 15;
-    order.forEach(node => {
-      if (node.fixed) return;
-      const t = node.tempPos * idealScale;
-      node.x = t * Math.cos(baseAngle);
-      node.y = t * Math.sin(baseAngle) + chainOffsetY;
-      node.chainAngle = baseAngle;
-    });
-  });
-
-  // Stap 2: Globale optimalisatie - BEWEG KETENS ALS GEHEEL
-  const iterations = 200;
-  const chainForces = new Map(); // DEFINIEER HIER!
-  
-  for (let it = 0; it < iterations; it++) {
-    // Reset chain forces
-    chainForces.clear();
-    chains.forEach(chain => chainForces.set(chain, {fx: 0, fy: 0}));
-
-    // Krachten tussen alle nodes berekenen
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i];
-        const b = nodes[j];
-        if (a.x == null || b.x == null) continue;
-
-        let dx = b.x - a.x;
-        let dy = b.y - a.y;
-        let dist2 = dx * dx + dy * dy + 0.1;
-        let force = 100 / dist2;
-        dx /= Math.sqrt(dist2);
-        dy /= Math.sqrt(dist2);
-
-        // Voeg toe aan chain forces
-        if (a.chainId != null && chains[a.chainId]) {
-          const fa = chainForces.get(chains[a.chainId]);
-          fa.fx += dx * force * 0.5;
-          fa.fy += dy * force * 0.5;
-        }
-        if (b.chainId != null && chains[b.chainId] && b.chainId !== a.chainId) {
-          const fb = chainForces.get(chains[b.chainId]);
-          fb.fx -= dx * force * 0.5;
-          fb.fy -= dy * force * 0.5;
-        }
-      }
-    }
-
-    // Afstanden respecteren (tussen verschillende ketens)
-    for (const seg of segments) {
-      const a = seg.from;
-      const b = seg.to;
-      if (a.chainId === b.chainId || a.x == null || b.x == null) continue;
-
-      const target = seg.dist ? seg.dist * idealScale : null;
-      let dx = b.x - a.x;
-      let dy = b.y - a.y;
-      let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      dx /= dist;
-      dy /= dist;
-      let desired = target || dist;
-      let delta = dist - desired;
-      let force = 0.6 * delta;
-
-      if (a.chainId != null && chains[a.chainId]) {
-        const fa = chainForces.get(chains[a.chainId]);
-        fa.fx += dx * force;
-        fa.fy += dy * force;
-      }
-      if (b.chainId != null && chains[b.chainId]) {
-        const fb = chainForces.get(chains[b.chainId]);
-        fb.fx -= dx * force;
-        fb.fy -= dy * force;
-      }
-    }
-
-    // Beweeg KETENS als geheel (hergebruik EXACTE volgorde)
-    chains.forEach((chain) => {
-      if (!chain.order) return;
-      
-      // Centre of mass
-      let cx = 0, cy = 0, count = 0;
-      chain.order.forEach(n => {
-        if (n.x != null && !n.fixed) {
-          cx += n.x; cy += n.y; count++;
-        }
+          // Initiële plaatsing met verschillende oriëntatie
+          const baseAngle = superIndex * 0.8 + chain.lineIndex * 0.2;
+          order.forEach(node => {
+            if (node.fixed) return;
+            const t = node.tempPos * idealScale;
+            node.x = t * Math.cos(baseAngle);
+            node.y = t * Math.sin(baseAngle);
+            node.chainAngle = baseAngle;
+          });
+        });
       });
-      if (count === 0) return;
-      cx /= count; cy /= count;
 
-      const force = chainForces.get(chain);
-      const rotForce = Math.atan2(force.fy, force.fx) * 0.02;
-      const newAngle = chain.order[0]?.chainAngle || 0 + rotForce;
+      // Stap 2: Globale optimalisatie per superchain
+      const iterations = 150;
+      for (let it = 0; it < iterations; it++) {
+        chains.forEach((superChain) => {
+          // Krachten berekenen tussen subchains
+          const chainForces = new Map();
+          superChain.subchains.forEach(chain => chainForces.set(chain, {fx: 0, fy: 0}));
 
-      // HERPLAATS EXACT langs lijn via opgeslagen volgorde
-      chain.order.forEach((node, i) => {
-        if (node.fixed) return;
-        const t = node.tempPos * idealScale;
-        node.x = cx + t * Math.cos(newAngle);
-        node.y = cy + t * Math.sin(newAngle);
-        node.chainAngle = newAngle;
-      });
-    });
-  }
-}
+          // Repulsie tussen nodes van verschillende subchains
+          for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+              const a = nodes[i];
+              const b = nodes[j];
+              if (a.chainId === b.chainId || a.x == null || b.x == null) continue;
 
+              let dx = b.x - a.x;
+              let dy = b.y - a.y;
+              let dist2 = dx * dx + dy * dy + 0.1;
+              let force = 80 / dist2;
+              dx /= Math.sqrt(dist2);
+              dy /= Math.sqrt(dist2);
+
+              const chainA = superChain.subchains.find(c => c.lineIndex === a.chainId);
+              const chainB = superChain.subchains.find(c => c.lineIndex === b.chainId);
+              if (chainA) {
+                const fa = chainForces.get(chainA);
+                fa.fx += dx * force * 0.3;
+                fa.fy += dy * force * 0.3;
+              }
+              if (chainB) {
+                const fb = chainForces.get(chainB);
+                fb.fx -= dx * force * 0.3;
+                fb.fy -= dy * force * 0.3;
+              }
+            }
+          }
+
+          // Inter-subchain afstanden respecteren
+          for (const seg of superChain.segments) {
+            const a = seg.from;
+            const b = seg.to;
+            if (a.chainId === b.chainId || a.x == null || b.x == null) continue;
+
+            const target = seg.dist ? seg.dist * idealScale : null;
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            dx /= dist;
+            dy /= dist;
+            let desired = target || dist;
+            let delta = dist - desired;
+            let force = 0.8 * delta;
+
+            const chainA = superChain.subchains.find(c => c.lineIndex === a.chainId);
+            const chainB = superChain.subchains.find(c => c.lineIndex === b.chainId);
+            if (chainA) {
+              const fa = chainForces.get(chainA);
+              fa.fx += dx * force;
+              fa.fy += dy * force;
+            }
+            if (chainB) {
+              const fb = chainForces.get(chainB);
+              fb.fx -= dx * force;
+              fb.fy -= dy * force;
+            }
+          }
+
+          // Beweeg subchains als geheel
+          superChain.subchains.forEach(chain => {
+            if (!chain.order || chain.order.length === 0) return;
+            
+            const force = chainForces.get(chain);
+            if (!force) return;
+
+            // Center of mass
+            let cx = 0, cy = 0, count = 0;
+            chain.order.forEach(n => {
+              if (n.x != null && !n.fixed) {
+                cx += n.x; cy += n.y; count++;
+              }
+            });
+            if (count === 0) return;
+            cx /= count; cy /= count;
+
+            const rotForce = Math.atan2(force.fy, force.fx) * 0.015;
+            const newAngle = chain.order[0].chainAngle + rotForce;
+
+            // Herplaats EXACT langs rechte lijn
+            chain.order.forEach(node => {
+              if (node.fixed) return;
+              const t = node.tempPos * idealScale;
+              node.x = cx + t * Math.cos(newAngle);
+              node.y = cy + t * Math.sin(newAngle);
+              node.chainAngle = newAngle;
+            });
+          });
+        });
+      }
+    }
 
     function render(nodes, segments) {
       while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -331,8 +368,8 @@ function layoutChainsStrict(nodes, segments, chains) {
       let minX = Math.min(...xs), maxX = Math.max(...xs);
       let minY = Math.min(...ys), maxY = Math.max(...ys);
       
-      if (minX === maxX) { minX -= 10; maxX += 10; }
-      if (minY === maxY) { minY -= 10; maxY += 10; }
+      if (xs.length === 0 || minX === maxX) { minX -= 10; maxX += 10; }
+      if (ys.length === 0 || minY === maxY) { minY -= 10; maxY += 10; }
       
       const pad = 8;
       const width = maxX - minX;
@@ -341,7 +378,7 @@ function layoutChainsStrict(nodes, segments, chains) {
       svg.setAttribute('viewBox',
         [minX - pad, minY - pad, width + 2 * pad, height + 2 * pad].join(' '));
 
-      // Segmenten (altijd perfect recht binnen keten)
+      // Segmenten
       for (const seg of segments) {
         const a = seg.from, b = seg.to;
         if (a.x == null || b.x == null) continue;
@@ -389,10 +426,10 @@ function layoutChainsStrict(nodes, segments, chains) {
       }
     }
 
-    // Init
+    // Init met driehoek voorbeeld
     textarea.value = `P1 -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
 P1 -- P5 [0.4] -gebouw- P6 [10.55] -- P7 [11.8]
-P7 -- P4 [5]`;
+P7 -- P4 [25]`;
     textarea.dispatchEvent(new Event('input'));
   </script>
 </body>
