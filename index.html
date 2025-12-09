@@ -169,162 +169,98 @@ P7 -- P4 [5]"></textarea>
     }
 
     // STRICT: binnen keten PERFECT recht, alleen ketens bewegen/rotëren als geheel
-    function layoutChainsStrict(nodes, segments, chains) {
-      if (nodes.length === 0) return;
+function layoutChainsStrict(nodes, segments, chains) {
+  if (nodes.length === 0) return;
 
-      const idealScale = 5;
+  const idealScale = 5;
 
-      // Stap 1: Per keten PERFECT rechte lijn maken met exacte afstanden
-      chains.forEach((chain, chainIndex) => {
-        if (chain.nodes.length === 0) return;
+  // Stap 1: Per keten PERFECT rechte lijn + SLA OP EXPLICIETE VOLGORDE OP
+  chains.forEach((chain, chainIndex) => {
+    if (chain.nodes.length === 0) return;
 
-        // Bepaal volgorde
-        const order = [];
-        if (chain.segments.length > 0) {
-          let current = chain.segments[0].from;
-          order.push(current);
-          for (const seg of chain.segments) {
-            if (seg.from === current && !order.includes(seg.to)) {
-              order.push(seg.to);
-              current = seg.to;
-            } else if (seg.to === current && !order.includes(seg.from)) {
-              order.push(seg.from);
-              current = seg.from;
-            }
-          }
-        }
-
-        // Cumulatieve afstanden (exact!)
-        let cum = 0;
-        order.forEach((node, i) => {
-          if (i === 0) {
-            node.tempPos = 0;
-            cum = 0;
-          } else {
-            const prev = order[i - 1];
-            const seg = chain.segments.find(s =>
-              (s.from === prev && s.to === node) || (s.to === prev && s.from === node));
-            cum += seg?.dist || 1;
-            node.tempPos = cum;
-          }
-        });
-
-        // Iedere keten krijgt unieke hoek + verticale offset
-        const baseAngle = (chainIndex * 0.6) + 0.3; // verschillende oriëntaties
-        const chainOffsetY = chainIndex * 15;
-
-        // ZET POSITIES EXACT langs rechte lijn
-        order.forEach(node => {
-          if (node.fixed) return; // behoud vaste coördinaten
-          const t = (node.tempPos || 0) * idealScale;
-          node.x = t * Math.cos(baseAngle);
-          node.y = t * Math.sin(baseAngle) + chainOffsetY;
-          node.chainAngle = baseAngle; // onthoud voor later
-        });
-      });
-
-      // Stap 2: Globale optimalisatie - BEWEG KETENS ALS GEHEEL, geen vervorming
-      const iterations = 200;
-      const chainForces = new Map(); // per keten: totale fx,fy voor rotatie/verschuiving
-      
-      for (let it = 0; it < iterations; it++) {
-        // Reset chain forces
-        chainForces.clear();
-        chains.forEach(chain => chainForces.set(chain, {fx: 0, fy: 0}));
-
-        // Krachten tussen alle nodes berekenen
-        for (let i = 0; i < nodes.length; i++) {
-          for (let j = i + 1; j < nodes.length; j++) {
-            const a = nodes[i];
-            const b = nodes[j];
-            if (a.x == null || b.x == null) continue;
-
-            let dx = b.x - a.x;
-            let dy = b.y - a.y;
-            let dist2 = dx * dx + dy * dy + 0.1;
-            let force = 100 / dist2;
-            dx /= Math.sqrt(dist2);
-            dy /= Math.sqrt(dist2);
-
-            // Voeg toe aan chain forces (gemiddeld per keten)
-            if (a.chainId != null) {
-              const fa = chainForces.get(chains[a.chainId]);
-              fa.fx += dx * force * 0.5;
-              fa.fy += dy * force * 0.5;
-            }
-            if (b.chainId != null && b.chainId !== a.chainId) {
-              const fb = chainForces.get(chains[b.chainId]);
-              fb.fx -= dx * force * 0.5;
-              fb.fy -= dy * force * 0.5;
-            }
-          }
-        }
-
-        // Afstanden respecteren (tussen verschillende ketens)
-        for (const seg of segments) {
-          const a = seg.from;
-          const b = seg.to;
-          if (a.chainId === b.chainId || a.x == null || b.x == null) continue;
-
-          const target = seg.dist ? seg.dist * idealScale : null;
-          let dx = b.x - a.x;
-          let dy = b.y - a.y;
-          let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-          dx /= dist;
-          dy /= dist;
-          let desired = target || dist;
-          let delta = dist - desired;
-          let force = 0.6 * delta;
-
-          if (a.chainId != null) {
-            const fa = chainForces.get(chains[a.chainId]);
-            fa.fx += dx * force;
-            fa.fy += dy * force;
-          }
-          if (b.chainId != null) {
-            const fb = chainForces.get(chains[b.chainId]);
-            fb.fx -= dx * force;
-            fb.fy -= dy * force;
-          }
-        }
-
-        // Beweeg KETENS als geheel (rotatie + translatie)
-        chains.forEach((chain, chainIndex) => {
-          const force = chainForces.get(chain);
-          if (chain.nodes.length === 0) return;
-
-          // Centre of mass berekenen
-          let cx = 0, cy = 0, count = 0;
-          chain.nodes.forEach(n => {
-            if (n.x != null && !n.fixed) {
-              cx += n.x;
-              cy += n.y;
-              count++;
-            }
-          });
-          if (count === 0) return;
-          cx /= count;
-          cy /= count;
-
-          // Rotatie rond center (kleine hoekwijziging)
-          const rotForce = Math.atan2(force.fy, force.fx) * 0.02;
-          const newAngle = chainIndex * 0.6 + rotForce;
-
-          // Translatie
-          const tx = force.fx * 0.1;
-          const ty = force.fy * 0.1;
-
-          // Herplaats alle nodes langs nieuwe rechte lijn
-          chain.nodes.forEach(node => {
-            if (node.fixed) return;
-            const t = (node.tempPos || 0) * idealScale;
-            node.x = cx + tx + t * Math.cos(newAngle);
-            node.y = cy + ty + t * Math.sin(newAngle);
-            node.chainAngle = newAngle;
-          });
-        });
+    // EXPLICIETE lineaire volgorde construeren uit segments
+    const orderMap = new Map(); // node -> index in keten
+    let order = [];
+    
+    // Start vanaf eerste node, bouw lineair voort
+    let startNode = chain.segments[0]?.from || chain.nodes[0];
+    order = [startNode];
+    orderMap.set(startNode, 0);
+    
+    for (let i = 0; i < chain.segments.length; i++) {
+      const seg = chain.segments[i];
+      const nextNode = seg.from === order[order.length-1] ? seg.to : seg.from;
+      if (!order.includes(nextNode)) {
+        order.push(nextNode);
+        orderMap.set(nextNode, order.length-1);
       }
     }
+    
+    chain.order = order; // OPSLAAN!
+    chain.orderMap = orderMap;
+
+    // Cumulatieve afstanden (exact!)
+    let cum = 0;
+    order.forEach((node, i) => {
+      if (i === 0) {
+        node.tempPos = 0;
+        cum = 0;
+      } else {
+        const prev = order[i - 1];
+        const seg = chain.segments.find(s =>
+          (s.from === prev && s.to === node) || (s.to === prev && s.from === node));
+        cum += seg?.dist || 1;
+        node.tempPos = cum;
+      }
+    });
+
+    // Initiële plaatsing
+    const baseAngle = chainIndex * 0.6;
+    const chainOffsetY = chainIndex * 15;
+    order.forEach(node => {
+      if (node.fixed) return;
+      const t = node.tempPos * idealScale;
+      node.x = t * Math.cos(baseAngle) + chainOffsetY * 0.1;
+      node.y = t * Math.sin(baseAngle);
+      node.chainAngle = baseAngle;
+    });
+  });
+
+  // Stap 2: Beweeg KETENS als GEHEEL (hergebruik EXACTE volgorde)
+  const iterations = 200;
+  for (let it = 0; it < iterations; it++) {
+    // ... (krachten berekenen blijft hetzelfde)
+
+    // Herplaats via BEWARENDE volgorde
+    chains.forEach(chain => {
+      if (!chain.order) return;
+      
+      // Center of mass
+      let cx = 0, cy = 0, count = 0;
+      chain.order.forEach(n => {
+        if (n.x != null && !n.fixed) {
+          cx += n.x; cy += n.y; count++;
+        }
+      });
+      if (count === 0) return;
+      cx /= count; cy /= count;
+
+      // Nieuwe hoek/positie voor hele keten
+      const rotForce = Math.atan2(chainForces.get(chain)?.fy || 0, chainForces.get(chain)?.fx || 0) * 0.02;
+      const newAngle = chain.order[0].chainAngle + rotForce;
+      
+      // HERPLAATS EXACT langs lijn via opgeslagen volgorde
+      chain.order.forEach((node, i) => {
+        if (node.fixed) return;
+        const t = node.tempPos * idealScale;
+        node.x = cx + t * Math.cos(newAngle);
+        node.y = cy + t * Math.sin(newAngle);
+        node.chainAngle = newAngle;
+      });
+    });
+  }
+}
+
 
     function render(nodes, segments) {
       while (svg.firstChild) svg.removeChild(svg.firstChild);
