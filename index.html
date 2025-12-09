@@ -48,16 +48,24 @@
       fill: #555;
     }
     .segment {
-      stroke: #111;
       stroke-width: 2;
+    }
+    .segment-default {
+      stroke: #111;
+    }
+    .segment-gebouw {
+      stroke: #d00;
     }
   </style>
 </head>
 <body>
   <div id="left">
     <textarea id="input"
-      placeholder="Voorbeeld:
-P1(0,0) [0] -- P2(10,0) [10] -- P3(10,5) [15]"></textarea>
+placeholder="Voorbeelden:
+P1(0,0) [0] -- P2(10,0) [10] -- P3(10,5) [15]
+P1 -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
+P1 -- P5 [0.4] -- P6 [10.55] -- P7 [11.8]
+P1 -gebouw- P2 [5.40] -gebouw- P3 [8.83]"></textarea>
   </div>
   <div id="right">
     <svg id="viewBox" viewBox="0 0 100 100"></svg>
@@ -69,136 +77,272 @@ P1(0,0) [0] -- P2(10,0) [10] -- P3(10,5) [15]"></textarea>
 
     textarea.addEventListener('input', () => {
       const text = textarea.value;
-      const chains = parseInput(text);
-      renderChains(chains);
+      const {nodes, segments} = parseInput(text);
+      layoutNodes(nodes, segments);
+      render(nodes, segments);
     });
 
-    // Structuur:
-    // invoer: "P1(0,0) [0] -- P2(10,0) [10]"
-    // output: [{id, x, y, distFromStart}] per keten
+    // --- Parsing ---
+
+    // nodes: {id, x, y, fixed, vx, vy}
+    // segments: {from, to, dist, type}  type: 'default' of 'gebouw'
     function parseInput(text) {
-      const chains = [];
+      const nodeMap = new Map();
+      const segments = [];
+
+      function getNode(id) {
+        const key = id.toUpperCase();
+        if (!nodeMap.has(key)) {
+          nodeMap.set(key, {
+            id: key,
+            x: null,
+            y: null,
+            fixed: false,
+            vx: 0,
+            vy: 0
+          });
+        }
+        return nodeMap.get(key);
+      }
+
       const lines = text.split(/\r?\n/)
         .map(l => l.trim())
         .filter(l => l.length > 0);
 
       for (const line of lines) {
-        const parts = line.split(/--/);
-        const points = [];
-        for (let i = 0; i < parts.length; i++) {
-          const raw = parts[i].trim();
-          if (!raw) continue;
+        // splits op zowel '--' als '-gebouw-'
+        const rawParts = line.split(/(-gebouw-)|(--)/i).filter(p => p && p.trim() !== '');
+        if (rawParts.length === 0) continue;
 
-          // identifier: eerste woord tot aan '(', '[', of spatie
-          const idMatch = raw.match(/^[^\s\(\[]+/);
-          const id = idMatch ? idMatch[0] : 'P' + (i + 1);
-
-          // coordinaat: (x,y)
-          let x = null, y = null;
-          const coordMatch = raw.match(/\(([^\)]+)\)/);
-          if (coordMatch) {
-            const nums = coordMatch[1].split(',').map(s => parseFloat(s.trim()));
-            if (nums.length >= 2 && !isNaN(nums[0]) && !isNaN(nums[1])) {
-              x = nums[0];
-              y = nums[1];
-            }
+        // bouw lijst van: node, connector, node, connector, ...
+        const tokens = [];
+        for (const part of rawParts) {
+          const trimmed = part.trim();
+          if (/^-?gebouw-?$/i.test(trimmed)) {
+            tokens.push({type: 'connector', value: 'gebouw'});
+          } else if (trimmed === '--') {
+            tokens.push({type: 'connector', value: 'default'});
+          } else {
+            tokens.push({type: 'node', value: trimmed});
           }
+        }
 
-          // afstand: [d]
+        // loop: node - connector - node - ...
+        for (let i = 0; i < tokens.length - 2; i += 2) {
+          const tA = tokens[i];
+          const tC = tokens[i + 1];
+          const tB = tokens[i + 2];
+          if (tA.type !== 'node' || tC.type !== 'connector' || tB.type !== 'node') continue;
+
+          const segType = tC.value === 'gebouw' ? 'gebouw' : 'default';
+
+          // parse node A
+          const nodeA = parseNodeToken(tA.value, getNode);
+          const nodeB = parseNodeToken(tB.value, getNode);
+
+          // afstand zit in de tweede token (tB)
+          const distMatch = tB.value.match(/\[([^\]]+)\]/);
           let dist = null;
-          const distMatch = raw.match(/\[([^\]]+)\]/);
           if (distMatch) {
-            const d = parseFloat(distMatch[1].trim());
+            const d = parseFloat(distMatch[1].trim().replace(',', '.'));
             if (!isNaN(d)) dist = d;
           }
 
-          points.push({ id, x, y, dist });
+          segments.push({
+            from: nodeA,
+            to: nodeB,
+            dist,
+            type: segType
+          });
         }
-        if (points.length > 0) chains.push(points);
       }
-      return chains;
+
+      const nodes = Array.from(nodeMap.values());
+      return {nodes, segments};
     }
 
-    function renderChains(chains) {
-      while (svg.firstChild) svg.removeChild(svg.firstChild);
+    function parseNodeToken(raw, getNode) {
+      // identifier: tot '(' of '[' of spatie
+      const idMatch = raw.match(/^[^\s\(\[]+/);
+      const id = idMatch ? idMatch[0] : raw.trim();
+      const node = getNode(id);
 
-      // verzamel alle bekende coordinaten voor schaal
-      const coords = [];
-      for (const chain of chains) {
-        for (const p of chain) {
-          if (p.x != null && p.y != null) coords.push([p.x, p.y]);
+      // coordinaat
+      const coordMatch = raw.match(/\(([^\)]+)\)/);
+      if (coordMatch) {
+        const nums = coordMatch[1].split(',').map(s => parseFloat(s.trim().replace(',', '.')));
+        if (nums.length >= 2 && !isNaN(nums[0]) && !isNaN(nums[1])) {
+          node.x = nums[0];
+          node.y = nums[1];
+          node.fixed = true;
         }
       }
-      if (coords.length === 0) return;
+      return node;
+    }
 
-      let minX = Math.min(...coords.map(c => c[0]));
-      let maxX = Math.max(...coords.map(c => c[0]));
-      let minY = Math.min(...coords.map(c => c[1]));
-      let maxY = Math.max(...coords.map(c => c[1]));
+    // --- Layout met eenvoudige afstoot + veer op segmenten ---
 
-      // voorkom nul-bereik
+    function layoutNodes(nodes, segments) {
+      if (nodes.length === 0) return;
+
+      // init: zet niet-vaste nodes op cirkel
+      const radius = 10;
+      let angleStep = (2 * Math.PI) / Math.max(1, nodes.length);
+      let k = 0;
+      for (const n of nodes) {
+        if (n.fixed && n.x != null && n.y != null) continue;
+        n.x = radius * Math.cos(k * angleStep);
+        n.y = radius * Math.sin(k * angleStep);
+        n.vx = 0;
+        n.vy = 0;
+        k++;
+      }
+
+      const iterations = 150;
+      const repulsion = 50;      // sterkte afstoot
+      const springK = 0.5;       // veer-constante langs segmenten
+      const idealScale = 5;      // schaal: 1 eenheid afstand -> 5 units in tekening
+      const damping = 0.85;      // demping snelheid
+
+      for (let it = 0; it < iterations; it++) {
+        // reset snelheid op basis van krachten
+        for (const n of nodes) {
+          if (!n.fixed) {
+            n.vx *= damping;
+            n.vy *= damping;
+          }
+        }
+
+        // afstotende kracht tussen alle paren
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const a = nodes[i];
+            const b = nodes[j];
+            let dx = a.x - b.x;
+            let dy = a.y - b.y;
+            let dist2 = dx * dx + dy * dy + 0.01;
+            let dist = Math.sqrt(dist2);
+            let force = repulsion / dist2;
+            dx /= dist;
+            dy /= dist;
+
+            if (!a.fixed) {
+              a.vx += dx * force;
+              a.vy += dy * force;
+            }
+            if (!b.fixed) {
+              b.vx -= dx * force;
+              b.vy -= dy * force;
+            }
+          }
+        }
+
+        // veer-krachten op segmenten (benaderen opgegeven afstand)
+        for (const seg of segments) {
+          const a = seg.from;
+          const b = seg.to;
+          if (a.x == null || b.x == null) continue;
+
+          const target = seg.dist != null ? seg.dist * idealScale : null;
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          dx /= dist;
+          dy /= dist;
+
+          let desired = target || dist; // als geen afstand: behoud huidige
+          let delta = dist - desired;
+          let force = springK * delta;
+
+          if (!a.fixed) {
+            a.vx += dx * force;
+            a.vy += dy * force;
+          }
+          if (!b.fixed) {
+            b.vx -= dx * force;
+            b.vy -= dy * force;
+          }
+        }
+
+        // posities bijwerken
+        for (const n of nodes) {
+          if (n.fixed) continue;
+          n.x += n.vx * 0.1;
+          n.y += n.vy * 0.1;
+        }
+      }
+    }
+
+    // --- Tekenfunctie ---
+
+    function render(nodes, segments) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      if (nodes.length === 0) return;
+
+      const xs = nodes.map(n => n.x);
+      const ys = nodes.map(n => n.y);
+      let minX = Math.min(...xs), maxX = Math.max(...xs);
+      let minY = Math.min(...ys), maxY = Math.max(...ys);
       if (minX === maxX) { minX -= 1; maxX += 1; }
       if (minY === maxY) { minY -= 1; maxY += 1; }
-
       const pad = 5;
       const width = maxX - minX;
       const height = maxY - minY;
 
-      // viewBox aanpassen zodat alles past
       svg.setAttribute('viewBox',
         [minX - pad, minY - pad, width + 2 * pad, height + 2 * pad].join(' '));
 
-      // teken ketens
-      for (const chain of chains) {
-        // lijnen tussen opeenvolgende punten met bekende coord
-        for (let i = 0; i < chain.length - 1; i++) {
-          const a = chain[i];
-          const b = chain[i + 1];
-          if (a.x == null || a.y == null || b.x == null || b.y == null) continue;
+      // segmenten
+      for (const seg of segments) {
+        const a = seg.from, b = seg.to;
+        if (a.x == null || b.x == null) continue;
 
-          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-          line.setAttribute('x1', a.x);
-          line.setAttribute('y1', a.y);
-          line.setAttribute('x2', b.x);
-          line.setAttribute('y2', b.y);
-          line.setAttribute('class', 'segment');
-          svg.appendChild(line);
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', a.x);
+        line.setAttribute('y1', a.y);
+        line.setAttribute('x2', b.x);
+        line.setAttribute('y2', b.y);
+        line.setAttribute('class', 'segment ' +
+          (seg.type === 'gebouw' ? 'segment-gebouw' : 'segment-default'));
+        svg.appendChild(line);
 
-          // afstandslabel, als dist van eindpunt bekend is
-          if (b.dist != null) {
-            const mx = (a.x + b.x) / 2;
-            const my = (a.y + b.y) / 2;
-            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            text.setAttribute('x', mx);
-            text.setAttribute('y', my - 1);
-            text.setAttribute('class', 'distance-label');
-            text.textContent = b.dist;
-            svg.appendChild(text);
-          }
+        if (seg.dist != null) {
+          const mx = (a.x + b.x) / 2;
+          const my = (a.y + b.y) / 2;
+          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', mx);
+          text.setAttribute('y', my - 1);
+          text.setAttribute('class', 'distance-label');
+          text.textContent = seg.dist;
+          svg.appendChild(text);
         }
+      }
 
-        // punten en labels
-        for (const p of chain) {
-          if (p.x == null || p.y == null) continue;
-          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-          circle.setAttribute('cx', p.x);
-          circle.setAttribute('cy', p.y);
-          circle.setAttribute('r', 0.6 * Math.max(width, height) / 50);
-          circle.setAttribute('class', 'point');
-          svg.appendChild(circle);
+      // punten
+      const maxDim = Math.max(width, height) || 1;
+      const r = 0.6 * maxDim / 50;
+      for (const n of nodes) {
+        const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        c.setAttribute('cx', n.x);
+        c.setAttribute('cy', n.y);
+        c.setAttribute('r', r);
+        c.setAttribute('class', 'point');
+        svg.appendChild(c);
 
-          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          label.setAttribute('x', p.x + width / 100);
-          label.setAttribute('y', p.y - height / 100);
-          label.setAttribute('class', 'point-label');
-          label.textContent = p.id;
-          svg.appendChild(label);
-        }
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', n.x + maxDim / 100);
+        label.setAttribute('y', n.y - maxDim / 100);
+        label.setAttribute('class', 'point-label');
+        label.textContent = n.id;
+        svg.appendChild(label);
       }
     }
 
-    // meteen initialiseren met voorbeeld
-    textarea.value = "P1(0,0) [0] -- P2(10,0) [10] -- P3(10,5) [15]";
+    // init met voorbeeld
+    textarea.value =
+`P1 -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
+P1 -- P5 [0.4] -- P6 [10.55] -- P7 [11.8]
+P1 -gebouw- P2 [5.40] -gebouw- P3 [8.83]`;
     textarea.dispatchEvent(new Event('input'));
   </script>
 </body>
