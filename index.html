@@ -35,6 +35,7 @@ P7 [11.80] -- P4 [16.05] [25]</textarea>
   <div id="right">
     <svg id="viewBox"></svg>
   </div>
+
 <script>
 const textarea = document.getElementById('input');
 const svg      = document.getElementById('viewBox');
@@ -69,6 +70,11 @@ function solveAndDraw() {
 
 // ------------ parsing ------------
 
+// Invoerregels zoals:
+// P1 [0] -- P2 [5.40] -- P3 [8.83]
+// Afstand t.o.v. eerste punt van de regel.
+// Link-regel:
+// P7 [11.80] -- P4 [16.05] [25]
 function parseInput(text) {
   const lines = [];   // {id, points:[{name,t}], x0,y0,theta}
   const links = [];   // {aName, bName, dist}
@@ -79,7 +85,7 @@ function parseInput(text) {
     const parts = lineText.split(/--/).map(p => p.trim()).filter(Boolean);
     const bracketMatches = lineText.match(/\[[^\]]+\]/g) || [];
 
-    // Ketenregel: elke punt-token heeft eigen [t] (afstand vanaf eerste punt)
+    // Ketenregel: elk punt heeft eigen [t]
     if (parts.length >= 2 && bracketMatches.length >= parts.length) {
       const line = {id: lineIdx, points: [], x0: 0, y0: 0, theta: 0};
       parts.forEach((token, i) => {
@@ -93,7 +99,7 @@ function parseInput(text) {
       });
       lines.push(line);
 
-    // Linkregel: precies twee punten en één extra [afstand] aan het eind
+    // Linkregel: twee punten, één extra [afstand] aan het eind
     } else if (parts.length === 2 && bracketMatches.length >= 1) {
       const left  = parts[0];
       const right = parts[1];
@@ -121,22 +127,21 @@ function parseInput(text) {
 
 // ------------ optimalisatie ------------
 
-// Alle punten op een lijn zijn afgeleid van x0,y0,theta; er is GEEN correctie per punt.
-// Een lijn kan dus alleen als star geheel verschuiven en roteren.
+// Rotatie van lijnen wordt NIET meer aangepast, alleen x0,y0.
+// Richtingen blijven dus zoals bij initialisatie; punten blijven collineair.
 function optimizeLines(lines, links) {
-  // init: zet lijnen als stralen met verschillende hoeken
+  // init: zet lijnen met vaste hoeken
   lines.forEach((ln, i) => {
     ln.x0 = 0;
-    ln.y0 = i * 10;
-    ln.theta = 0.5 * i;
+    ln.y0 = i * 10;       // verticale spreiding
+    ln.theta = 0.4 * i;   // vaste, verschillende richtingen per lijn
   });
 
   const iters   = 400;
   const stepPos = 0.02;
-  const stepAng = 0.0005;
 
   for (let it = 0; it < iters; it++) {
-    const grad = lines.map(() => ({gx0: 0, gy0: 0, gth: 0}));
+    const grad = lines.map(() => ({gx0: 0, gy0: 0}));
 
     links.forEach(link => {
       const aInfo = findPointOnLines(lines, link.aName);
@@ -160,24 +165,17 @@ function optimizeLines(lines, links) {
       const gA = grad[aInfo.lineIndex];
       const gB = grad[bInfo.lineIndex];
 
-      // translatie van beide lijnen
+      // alleen translatie (geen rotatie)
       gA.gx0 +=  fx;
       gA.gy0 +=  fy;
       gB.gx0 -=  fx;
       gB.gy0 -=  fy;
-
-      // eenvoudige rotatie-bijdrage: moment ~ kracht * t
-      const ta = aInfo.point.t;
-      const tb = bInfo.point.t;
-      gA.gth += ta * (-fy) * 0.01;
-      gB.gth -= tb * (-fy) * 0.01;
     });
 
-    // update: alleen x0,y0,theta per lijn (punten zelf worden NIET aangepast)
+    // update: alleen x0,y0 per lijn
     lines.forEach((ln, i) => {
-      ln.x0   -= grad[i].gx0 * stepPos;
-      ln.y0   -= grad[i].gy0 * stepPos;
-      ln.theta -= grad[i].gth * stepAng;
+      ln.x0 -= grad[i].gx0 * stepPos;
+      ln.y0 -= grad[i].gy0 * stepPos;
     });
   }
 }
@@ -218,7 +216,6 @@ function renderSvg(lines) {
 
   const coords = Array.from(pointCoords.values());
   if (!coords.length) return;
-
   const xs = coords.map(c => c.x);
   const ys = coords.map(c => c.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -272,7 +269,5 @@ function clearSvg() {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 }
 </script>
-
-
 </body>
 </html>
