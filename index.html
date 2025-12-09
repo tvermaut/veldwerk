@@ -2,17 +2,17 @@
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
-  <title>Kadastrale metingen visualisatie</title>
+  <title>Kadastrale metingen LSQ</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: sans-serif; height: 100vh; display: flex; }
     #left { width: 50%; padding: 10px; border-right: 1px solid #ccc; }
     #right { width: 50%; padding: 10px; }
-    textarea { width: 100%; height: calc(100vh - 20px); font-family: monospace; font-size: 14px; }
+    textarea { width: 100%; height: calc(100vh - 20px); font-family: monospace; font-size: 13px; }
     svg { width: 100%; height: 100%; border: 1px solid #ccc; background: #fafafa; }
     .point { fill: #0074D9; stroke: #003366; stroke-width: 1; }
-    .point-label { font-size: 12px; fill: #000; }
-    .distance-label { font-size: 11px; fill: #555; }
+    .point-label { font-size: 11px; fill: #000; }
+    .distance-label { font-size: 10px; fill: #555; }
     .segment { stroke-width: 2; }
     .segment-default { stroke: #111; }
     .segment-gebouw { stroke: #d00; }
@@ -20,229 +20,307 @@
 </head>
 <body>
   <div id="left">
-    <textarea id="input">P1 -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
+<textarea id="input">
+P1 -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
 P1 -- P5 [0.4] -gebouw- P6 [10.55] -- P7 [11.8]
-P7 -- P4 [25]</textarea>
+P7 -- P4 [25]
+</textarea>
+    <button id="solveBtn">Herbereken</button>
   </div>
   <div id="right">
     <svg id="viewBox" viewBox="0 0 100 100"></svg>
   </div>
 
-  <script>
-    const textarea = document.getElementById('input');
-    const svg = document.getElementById('viewBox');
+<script>
+const textarea = document.getElementById('input');
+const svg = document.getElementById('viewBox');
+const solveBtn = document.getElementById('solveBtn');
 
-    textarea.addEventListener('input', updateViz);
+solveBtn.addEventListener('click', solveAndDraw);
+window.addEventListener('load', solveAndDraw);
 
-    function updateViz() {
-      const {nodes, segments, chains} = parseInput(textarea.value);
-      layoutChains(nodes, chains);
-      render(svg, nodes, segments);
-    }
+function solveAndDraw() {
+  const {nodes, segments, chains} = parseInput(textarea.value);
+  if (nodes.length === 0) return;
+  leastSquaresLayout(nodes, segments, chains);
+  renderSVG(nodes, segments);
+}
 
-    function parseInput(text) {
-      const nodes = new Map();
-      const segments = [];
-      const chains = [];
+/* ---------- PARSING ---------- */
 
-      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+function parseInput(text) {
+  const nodeMap = new Map();
+  const segments = [];
+  const chains = [];
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
-      lines.forEach((line, lineIdx) => {
-        // Parse: P1 -- P2 [5.40] -- P3 [8.83]
-        const parts = line.split(/(\s*--\s*|-gebouw-\s*)/).filter(p => p.trim());
-        const chainNodes = [];
-        const chainSegs = [];
-
-        for (let i = 0; i < parts.length - 2; i += 2) {
-          const nodeAText = parts[i].trim();
-          const connector = parts[i + 1].trim();
-          const nodeBText = parts[i + 2].trim();
-
-          const nodeA = getOrCreateNode(nodes, nodeAText);
-          const nodeB = getOrCreateNode(nodes, nodeBText);
-          chainNodes.push(nodeA, nodeB);
-
-          const distMatch = nodeBText.match(/\[([\d.,]+)\]/);
-          const dist = distMatch ? parseFloat(distMatch[1].replace(',', '.')) : null;
-
-          const type = connector.includes('gebouw') ? 'gebouw' : 'default';
-          const seg = {from: nodeA, to: nodeB, dist, type};
-          chainSegs.push(seg);
-          segments.push(seg);
-        }
-
-        if (chainNodes.length > 0) {
-          chains.push({nodes: chainNodes, segments: chainSegs, id: lineIdx});
-        }
+  function getNode(id) {
+    const key = id.toUpperCase();
+    if (!nodeMap.has(key)) {
+      nodeMap.set(key, {
+        id: key,
+        x: Math.random()*2 - 1,
+        y: Math.random()*2 - 1,
+        fixed: false,
+        lineId: null,
+        t: 0  // parameter langs lijn
       });
-
-      return {
-        nodes: Array.from(nodes.values()),
-        segments,
-        chains
-      };
     }
+    return nodeMap.get(key);
+  }
 
-    function getOrCreateNode(nodesMap, text) {
-      const idMatch = text.match(/^([A-Z]\d+)/);
-      const id = idMatch ? idMatch[1] : 'P' + (nodesMap.size + 1);
-      
-      if (!nodesMap.has(id)) {
-        const coordMatch = text.match(/\(([-\d.]+),([-\d.]+)\)/);
-        nodesMap.set(id, {
-          id,
-          x: coordMatch ? parseFloat(coordMatch[1]) : null,
-          y: coordMatch ? parseFloat(coordMatch[2]) : null,
-          fixed: !!coordMatch
-        });
+  lines.forEach((line, lineIndex) => {
+    // splits op connectoren, houdt connectoren als aparte tokens
+    const tokens = line.split(/(\s*--\s*|-gebouw-\s*)/).map(t => t.trim()).filter(t => t.length);
+    const lineNodes = [];
+    const lineSegs = [];
+
+    for (let i = 0; i < tokens.length - 2; i += 2) {
+      const left = tokens[i];
+      const conn = tokens[i+1];
+      const right = tokens[i+2];
+
+      const nodeA = parseNodeToken(left, getNode);
+      const nodeB = parseNodeToken(right, getNode);
+      nodeA.lineId = lineIndex;
+      nodeB.lineId = lineIndex;
+      lineNodes.push(nodeA, nodeB);
+
+      let dist = null;
+      const dMatch = right.match(/\[([^\]]+)\]/);
+      if (dMatch) dist = parseFloat(dMatch[1].replace(',', '.'));
+
+      const type = /gebouw/i.test(conn) ? 'gebouw' : 'default';
+      const seg = {from: nodeA, to: nodeB, dist, type};
+      segments.push(seg);
+      lineSegs.push(seg);
+    }
+    if (lineNodes.length) {
+      chains.push({lineId: lineIndex, nodes: Array.from(new Set(lineNodes)), segments: lineSegs});
+    }
+  });
+
+  return {nodes: Array.from(nodeMap.values()), segments, chains};
+}
+
+function parseNodeToken(raw, getNode) {
+  const idMatch = raw.match(/^([A-Za-z]\d+)/);
+  const id = idMatch ? idMatch[1] : raw.trim();
+  const node = getNode(id);
+  const coordMatch = raw.match(/\(([^)]+)\)/);
+  if (coordMatch) {
+    const [xs, ys] = coordMatch[1].split(',').map(s => parseFloat(s.trim()));
+    if (!isNaN(xs) && !isNaN(ys)) {
+      node.x = xs;
+      node.y = ys;
+      node.fixed = true;
+    }
+  }
+  return node;
+}
+
+/* ---------- LEAST SQUARES / CONSTRAINTS ---------- */
+
+function leastSquaresLayout(nodes, segments, chains) {
+  if (nodes.length === 0) return;
+
+  // indices voor variabelen
+  const idxMap = new Map();
+  nodes.forEach((n, i) => idxMap.set(n.id, i));
+
+  // 1. init t (1D coördinaat langs elke lijn) op basis van cumulatieve afstand
+  chains.forEach(chain => {
+    const order = buildOrder(chain);
+    let cum = 0;
+    order.forEach((n, i) => {
+      if (i === 0) {
+        n.t = 0;
+      } else {
+        const prev = order[i-1];
+        const seg = chain.segments.find(
+          s => (s.from === prev && s.to === n) || (s.to === prev && s.from === n)
+        );
+        cum += (seg && seg.dist) ? seg.dist : 1;
+        n.t = cum;
       }
-      return nodesMap.get(id);
+    });
+  });
+
+  // 2. initialiseer per lijn een richtingvector (unit-vector)
+  const lineDirs = new Map(); // lineId -> {ux, uy}
+  chains.forEach((chain, k) => {
+    const angle = k * Math.PI/5; // spreiding
+    lineDirs.set(chain.lineId, {ux: Math.cos(angle), uy: Math.sin(angle)});
+  });
+
+  // 3. fixeer referentie: eerste node op (0,0), tweede op x-as
+  const base = nodes[0];
+  base.x = 0; base.y = 0; base.fixed = true;
+  let second = nodes.find(n => n !== base);
+  if (!second) second = base;
+  second.x = 10; second.y = 0; second.fixed = true;
+
+  // 4. iteratieve LSQ: pas coördinaten en richtingen aan
+  const iters = 300;
+  const step = 0.01;
+
+  for (let it = 0; it < iters; it++) {
+    // forces reset
+    const fx = new Array(nodes.length).fill(0);
+    const fy = new Array(nodes.length).fill(0);
+    const dux = new Map(); const duy = new Map();
+    lineDirs.forEach((_, lid) => { dux.set(lid, 0); duy.set(lid, 0); });
+
+    // 4a. lijn-collineariteit + t-projectie
+    chains.forEach(chain => {
+      const dir = lineDirs.get(chain.lineId);
+      const ux = dir.ux, uy = dir.uy;
+
+      chain.nodes.forEach(n => {
+        const i = idxMap.get(n.id);
+        // gewenste positie op lijn: p0 + t*dir
+        // neem eerste node van lijn als p0
+        const p0 = chain.nodes[0];
+        const j = idxMap.get(p0.id);
+        const x0 = nodes[j].x, y0 = nodes[j].y;
+
+        const tx = x0 + n.t * ux;
+        const ty = y0 + n.t * uy;
+
+        const ex = nodes[i].x - tx;
+        const ey = nodes[i].y - ty;
+
+        fx[i] -= ex * 0.5;
+        fy[i] -= ey * 0.5;
+
+        // kleine correctie op richtingvector
+        const d_ux = -(ex * n.t);
+        const d_uy = -(ey * n.t);
+        dux.set(chain.lineId, dux.get(chain.lineId) + d_ux * 0.0005);
+        duy.set(chain.lineId, duy.get(chain.lineId) + d_uy * 0.0005);
+      });
+    });
+
+    // 4b. afstandsvergelijkingen
+    segments.forEach(seg => {
+      if (!seg.dist) return;
+      const a = seg.from, b = seg.to;
+      const ia = idxMap.get(a.id), ib = idxMap.get(b.id);
+      const dx = nodes[ib].x - nodes[ia].x;
+      const dy = nodes[ib].y - nodes[ia].y;
+      const d = Math.sqrt(dx*dx + dy*dy) || 1e-6;
+      const err = d - seg.dist;
+      const w = 0.8;
+
+      const ex = w * err * (dx/d);
+      const ey = w * err * (dy/d);
+
+      fx[ia] += ex;
+      fy[ia] += ey;
+      fx[ib] -= ex;
+      fy[ib] -= ey;
+    });
+
+    // 4c. update richtingen
+    lineDirs.forEach((dir, lid) => {
+      let ux = dir.ux + dux.get(lid);
+      let uy = dir.uy + duy.get(lid);
+      const len = Math.sqrt(ux*ux + uy*uy) || 1;
+      lineDirs.set(lid, {ux: ux/len, uy: uy/len});
+    });
+
+    // 4d. update coördinaten
+    nodes.forEach((n, i) => {
+      if (n.fixed) return;
+      n.x -= step * fx[i];
+      n.y -= step * fy[i];
+    });
+  }
+}
+
+// bouw orde langs een lijn (eenvoudige keten)
+function buildOrder(chain) {
+  if (!chain.segments.length) return chain.nodes;
+  const adj = new Map();
+  chain.nodes.forEach(n => adj.set(n, []));
+  chain.segments.forEach(s => {
+    adj.get(s.from).push(s.to);
+    adj.get(s.to).push(s.from);
+  });
+  // zoek een eindpunt (degree 1) als start
+  let start = chain.nodes[0];
+  for (const n of chain.nodes) {
+    if (adj.get(n).length === 1) { start = n; break; }
+  }
+  const order = [start];
+  const visited = new Set([start]);
+  let current = start;
+  while (true) {
+    const next = adj.get(current).find(n => !visited.has(n));
+    if (!next) break;
+    order.push(next);
+    visited.add(next);
+    current = next;
+  }
+  return order;
+}
+
+/* ---------- SVG RENDER ---------- */
+
+function renderSVG(nodes, segments) {
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  const xs = nodes.map(n => n.x);
+  const ys = nodes.map(n => n.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 5;
+  const w = maxX - minX || 10;
+  const h = maxY - minY || 10;
+  svg.setAttribute('viewBox', `${minX-pad} ${minY-pad} ${w+2*pad} ${h+2*pad}`);
+
+  // segmenten
+  segments.forEach(seg => {
+    const a = seg.from, b = seg.to;
+    if (a.x == null || b.x == null) return;
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1', a.x);
+    line.setAttribute('y1', a.y);
+    line.setAttribute('x2', b.x);
+    line.setAttribute('y2', b.y);
+    line.setAttribute('class', 'segment ' + (seg.type==='gebouw'?'segment-gebouw':'segment-default'));
+    svg.appendChild(line);
+
+    if (seg.dist != null) {
+      const mx = (a.x + b.x)/2;
+      const my = (a.y + b.y)/2;
+      const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+      t.setAttribute('x', mx);
+      t.setAttribute('y', my-1);
+      t.setAttribute('class','distance-label');
+      t.textContent = seg.dist.toFixed(2);
+      svg.appendChild(t);
     }
+  });
 
-    function layoutChains(nodes, chains) {
-      // Stap 1: Initialiseer ketens recht
-      chains.forEach((chain, idx) => {
-        const angle = idx * 0.7;
-        let cumDist = 0;
-        
-        chain.segments.forEach((seg, segIdx) => {
-          const nodeA = seg.from;
-          const nodeB = seg.to;
-          
-          if (!nodeA.fixed) nodeA.x = cumDist * Math.cos(angle);
-          if (!nodeA.fixed) nodeA.y = cumDist * Math.sin(angle);
-          
-          cumDist += seg.dist || 5;
-          
-          if (!nodeB.fixed) nodeB.x = cumDist * Math.cos(angle);
-          if (!nodeB.fixed) nodeB.y = cumDist * Math.sin(angle);
-        });
-      });
+  // punten
+  const r = Math.max(0.5, Math.min(w,h)/80);
+  nodes.forEach(n => {
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx', n.x);
+    c.setAttribute('cy', n.y);
+    c.setAttribute('r', r);
+    c.setAttribute('class','point');
+    svg.appendChild(c);
 
-      // Stap 2: Force-directed relaxatie (behoud ketens recht)
-      for (let iter = 0; iter < 100; iter++) {
-        // Repulsie
-        for (let i = 0; i < nodes.length; i++) {
-          for (let j = i + 1; j < nodes.length; j++) {
-            const a = nodes[i], b = nodes[j];
-            if (!a.x || !b.x) continue;
-            
-            const dx = b.x - a.x;
-            const dy = b.y - a.y;
-            const dist = Math.sqrt(dx*dx + dy*dy) + 0.1;
-            const force = 2000 / (dist * dist);
-            
-            if (!a.fixed) {
-              a.x += (dx / dist) * force * 0.01;
-              a.y += (dy / dist) * force * 0.01;
-            }
-            if (!b.fixed) {
-              b.x -= (dx / dist) * force * 0.01;
-              b.y -= (dy / dist) * force * 0.01;
-            }
-          }
-        }
-
-        // Trek ketens recht
-        chains.forEach(chain => {
-          let firstNode = chain.segments[0]?.from;
-          if (!firstNode?.x) return;
-          
-          let cumDist = 0;
-          chain.segments.forEach(seg => {
-            const nodeA = seg.from;
-            const nodeB = seg.to;
-            
-            cumDist += seg.dist || 5;
-            
-            // Projecteer op lijn vanaf firstNode
-            const dx = nodeA.x - firstNode.x;
-            const dy = nodeA.y - firstNode.y;
-            const angle = Math.atan2(dy, dx);
-            
-            if (!nodeA.fixed) {
-              nodeA.x = firstNode.x + cumDist * Math.cos(angle);
-              nodeA.y = firstNode.y + cumDist * Math.sin(angle);
-            }
-            
-            if (!nodeB.fixed) {
-              nodeB.x = firstNode.x + cumDist * Math.cos(angle);
-              nodeB.y = firstNode.y + cumDist * Math.sin(angle);
-            }
-          });
-        });
-      }
-    }
-
-    function render(svg, nodes, segments) {
-      svg.innerHTML = '';
-
-      const bounds = {
-        minX: Infinity, maxX: -Infinity,
-        minY: Infinity, maxY: -Infinity
-      };
-
-      nodes.forEach(n => {
-        if (n.x !== null && n.y !== null) {
-          bounds.minX = Math.min(bounds.minX, n.x);
-          bounds.maxX = Math.max(bounds.maxX, n.x);
-          bounds.minY = Math.min(bounds.minY, n.y);
-          bounds.maxY = Math.max(bounds.maxY, n.y);
-        }
-      });
-
-      const pad = 5;
-      const width = bounds.maxX - bounds.minX || 20;
-      const height = bounds.maxY - bounds.minY || 20;
-      svg.setAttribute('viewBox', 
-        `${bounds.minX - pad} ${bounds.minY - pad} ${width + 2*pad} ${height + 2*pad}`);
-
-      // Segmenten
-      segments.forEach(seg => {
-        if (!seg.from.x || !seg.to.x) return;
-
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('x1', seg.from.x);
-        line.setAttribute('y1', seg.from.y);
-        line.setAttribute('x2', seg.to.x);
-        line.setAttribute('y2', seg.to.y);
-        line.setAttribute('class', `segment segment-${seg.type}`);
-        svg.appendChild(line);
-
-        if (seg.dist) {
-          const mx = (seg.from.x + seg.to.x) / 2;
-          const my = (seg.from.y + seg.to.y) / 2;
-          const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          text.setAttribute('x', mx);
-          text.setAttribute('y', my);
-          text.setAttribute('class', 'distance-label');
-          text.textContent = seg.dist.toFixed(2);
-          svg.appendChild(text);
-        }
-      });
-
-      // Punten
-      const r = Math.max(2, Math.min(width, height) / 50);
-      nodes.forEach(n => {
-        if (!n.x || !n.y) return;
-        
-        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        circle.setAttribute('cx', n.x);
-        circle.setAttribute('cy', n.y);
-        circle.setAttribute('r', r);
-        circle.setAttribute('class', 'point');
-        svg.appendChild(circle);
-
-        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        label.setAttribute('x', n.x + r);
-        label.setAttribute('y', n.y - r);
-        label.setAttribute('class', 'point-label');
-        label.textContent = n.id;
-        svg.appendChild(label);
-      });
-    }
-
-    updateViz();
-  </script>
+    const label = document.createElementNS('http://www.w3.org/2000/svg','text');
+    label.setAttribute('x', n.x + r*1.5);
+    label.setAttribute('y', n.y - r*1.5);
+    label.setAttribute('class','point-label');
+    label.textContent = n.id;
+    svg.appendChild(label);
+  });
+}
+</script>
 </body>
 </html>
