@@ -2,177 +2,300 @@
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
-  <title>Driehoek uit afstanden</title>
+  <title>Kadastrale ketens – rechte lijnen</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: sans-serif; height: 100vh; display: flex; }
-    #left { width: 40%; padding: 10px; border-right: 1px solid #ccc; }
-    #right { width: 60%; padding: 10px; }
-    label { display: block; margin-top: 6px; }
-    input { width: 100%; padding: 4px; margin-top: 2px; }
-    button { margin-top: 10px; padding: 6px 10px; }
+    #left { width: 45%; padding: 10px; border-right: 1px solid #ccc; }
+    #right { width: 55%; padding: 10px; }
+    textarea { width: 100%; height: calc(100vh - 60px); font-family: monospace; font-size: 13px; }
+    button { margin-top: 6px; padding: 6px 10px; }
     svg { width: 100%; height: calc(100vh - 20px); border: 1px solid #ccc; background: #fafafa; }
     .point { fill: #0074D9; stroke: #003366; stroke-width: 1; }
     .point-label { font-size: 11px; fill: #000; }
-    .segment { stroke: #111; stroke-width: 1.5; }
-    .error { color: #b00; margin-top: 8px; }
+    .distance-label { font-size: 10px; fill: #555; }
+    .segment { stroke-width: 2; }
+    .segment-default { stroke: #111; }
+    .segment-gebouw { stroke: #d00; }
+    .error { color: #b00; margin-top: 6px; white-space: pre-line; }
   </style>
 </head>
 <body>
   <div id="left">
-    <h3>Driehoek uit afstanden</h3>
-    <p>Voer de drie zijden van een driehoek in (in dezelfde eenheid):</p>
-
-    <label>
-      Afstand P1–P2
-      <input type="number" step="0.01" id="d12" value="5.40">
-    </label>
-    <label>
-      Afstand P2–P3
-      <input type="number" step="0.01" id="d23" value="8.83">
-    </label>
-    <label>
-      Afstand P3–P1
-      <input type="number" step="0.01" id="d31" value="16.05">
-    </label>
-
-    <button id="drawBtn">Teken driehoek</button>
+    <h3>Kadastrale ketens</h3>
+    <p>Per regel een rechte keten. Afstand in [ ] is t.o.v. het eerste punt van die keten.</p>
+<textarea id="input">
+P1 [0] -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
+P1 [0] -- P5 [0.40] -gebouw- P6 [10.55] -- P7 [11.80]
+P7 [11.80] -- P4 [16.05] [25]</textarea>
+    <button id="solveBtn">Herbereken</button>
     <div id="msg" class="error"></div>
   </div>
 
   <div id="right">
-    <svg id="svg" viewBox="-10 -10 20 20"></svg>
+    <svg id="viewBox"></svg>
   </div>
 
 <script>
-const d12Input = document.getElementById('d12');
-const d23Input = document.getElementById('d23');
-const d31Input = document.getElementById('d31');
-const drawBtn  = document.getElementById('drawBtn');
+const textarea = document.getElementById('input');
+const svg      = document.getElementById('viewBox');
+const solveBtn = document.getElementById('solveBtn');
 const msgEl    = document.getElementById('msg');
-const svg      = document.getElementById('svg');
 
-drawBtn.addEventListener('click', () => {
+solveBtn.addEventListener('click', solveAndDraw);
+window.addEventListener('load', solveAndDraw);
+
+// ------------ hoofdentry ------------
+function solveAndDraw() {
   msgEl.textContent = '';
-  const d12 = parseFloat(d12Input.value);
-  const d23 = parseFloat(d23Input.value);
-  const d31 = parseFloat(d31Input.value);
-
-  if (!isFinite(d12) || !isFinite(d23) || !isFinite(d31) ||
-      d12 <= 0 || d23 <= 0 || d31 <= 0) {
-    msgEl.textContent = 'Alle afstanden moeten positieve getallen zijn.';
+  const text = textarea.value;
+  let parsed;
+  try {
+    parsed = parseInput(text);
+  } catch (e) {
+    msgEl.textContent = 'Parse-fout: ' + e.message;
+    clearSvg();
+    return;
+  }
+  const {lines, links, allPoints} = parsed;
+  if (lines.length === 0) {
+    msgEl.textContent = 'Geen lijnen gevonden.';
     clearSvg();
     return;
   }
 
-  const pts = triangleFromDistances(d12, d23, d31);
-  if (!pts) {
-    msgEl.textContent = 'Geen geldige driehoek: schending van de driehoeksongelijkheid of numerieke fout.';
-    clearSvg();
-    return;
-  }
-
-  drawTriangleSvg(svg, pts);
-});
-
-// Bereken coördinaten van driehoek uit drie zijden
-function triangleFromDistances(d12, d23, d31) {
-  // Driehoeksongelijkheid checken
-  if (d12 + d23 <= d31 || d12 + d31 <= d23 || d23 + d31 <= d12) {
-    return null;
-  }
-
-  // P1 = (0,0)
-  const x1 = 0, y1 = 0;
-
-  // P2 = (d12, 0)
-  const x2 = d12, y2 = 0;
-
-  // P3 uit snijpunten van twee cirkels met straal d31 en d23
-  const a  = d12;
-  const r1 = d31;
-  const r2 = d23;
-
-  // Formule voor x3 langs de x-as
-  const x3 = (r1*r1 - r2*r2 + a*a) / (2*a);
-  const under = r1*r1 - x3*x3;
-  if (under < 0) {
-    // Door afrondingsfouten kan dit net onder 0 komen
-    if (under > -1e-8) {
-      return [
-        {id:'P1', x:x1, y:y1},
-        {id:'P2', x:x2, y:y2},
-        {id:'P3', x:x3, y:0}
-      ];
-    }
-    return null;
-  }
-  const y3 = Math.sqrt(under); // kies de “bovenste” oplossing
-
-  return [
-    {id:'P1', x:x1, y:y1},
-    {id:'P2', x:x2, y:y2},
-    {id:'P3', x:x3, y:y3}
-  ];
+  optimizeLines(lines, links);
+  renderSvg(lines, allPoints);
 }
 
-function drawTriangleSvg(svg, pts) {
+// ------------ parsing ------------
+
+// Invoerregels zoals:
+// P1 [0] -- P2 [5.40] -- P3 [8.83]
+// Afstand t.o.v. eerste punt van de regel.
+// Extra "link"-regel (optioneel) kan vorm hebben:
+// P7 [11.80] -- P4 [16.05] [25]
+// waar laatste [25] een gemeten afstand tussen P7 en P4 is.
+function parseInput(text) {
+  const lines = [];   // {id, points:[{name,t}], x0,y0,theta}
+  const links = [];   // {aName, bName, dist}
+  const pointIndex = new Map(); // name -> {line, idxInLine}
+  const allPoints = new Map();  // name -> {name}
+
+  const rows = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length);
+
+  rows.forEach((lineText, lineIdx) => {
+    // eerst checken of dit een pure keten is of een "link"-regel
+    // we kijken naar aantal [..]-blokken:
+    const bracketMatches = lineText.match(/\[[^\]]+\]/g) || [];
+    const arrowMatches   = lineText.match(/--/g) || [];
+    const parts = lineText.split(/--/).map(p => p.trim()).filter(Boolean);
+
+    if (parts.length >= 2 && bracketMatches.length >= parts.length) {
+      // Dit interpreteren we als keten
+      const line = {id: lineIdx, points: [], x0:0, y0:0, theta:0};
+      parts.forEach((token, i) => {
+        const nameMatch = token.match(/^([A-Za-z]\d+)/);
+        if (!nameMatch) throw new Error('Kan puntnaam niet vinden in: ' + token);
+        const name = nameMatch[1].toUpperCase();
+        const distMatch = token.match(/\[([^\]]+)\]/);
+        const t = distMatch ? parseFloat(distMatch[1].replace(',', '.')) : (i === 0 ? 0 : NaN);
+        if (!isFinite(t)) throw new Error('Ongeldige afstand in: ' + token);
+
+        line.points.push({name, t});
+        allPoints.set(name, {name});
+
+        if (!pointIndex.has(name)) pointIndex.set(name, []);
+        pointIndex.get(name).push({lineId: line.id, idx: i});
+      });
+      lines.push(line);
+    } else if (parts.length === 2 && bracketMatches.length >= 1) {
+      // interpretatie: losse afstand tussen twee punten
+      const left  = parts[0];
+      const right = parts[1];
+      const leftNameMatch  = left.match(/^([A-Za-z]\d+)/);
+      const rightNameMatch = right.match(/^([A-Za-z]\d+)/);
+      if (!leftNameMatch || !rightNameMatch) throw new Error('Onjuiste link-regel: ' + lineText);
+      const aName = leftNameMatch[1].toUpperCase();
+      const bName = rightNameMatch[1].toUpperCase();
+      const distMatch = lineText.match(/\[([^\]]+)\]\s*$/);
+      if (!distMatch) throw new Error('Geen afstand gevonden in link-regel: ' + lineText);
+      const d = parseFloat(distMatch[1].replace(',', '.'));
+      if (!isFinite(d)) throw new Error('Ongeldige link-afstand in: ' + lineText);
+      links.push({aName, bName, dist: d});
+      allPoints.set(aName, {name:aName});
+      allPoints.set(bName, {name:bName});
+    } else {
+      throw new Error('Onherkenbare regel: ' + lineText);
+    }
+  });
+
+  // Als er geen expliciete link-regels zijn, kun je er later nog voor kiezen
+  // om ketens via gedeelde punten te koppelen.
+
+  return {lines, links, allPoints};
+}
+
+// ------------ optimalisatie ------------
+
+function optimizeLines(lines, links) {
+  // init: zet lijnen als stralen vanuit oorsprong met verschillende hoeken
+  lines.forEach((ln, i) => {
+    ln.x0 = 0;
+    ln.y0 = i * 10;       // verticale spreiding
+    ln.theta = 0.4 * i;   // verschillende richtingen
+  });
+
+  // aantal iteraties en stappen
+  const iters = 400;
+  const stepPos = 0.02;
+  const stepAng = 0.0005;
+
+  for (let it = 0; it < iters; it++) {
+    // gradients per lijn
+    const grad = lines.map(() => ({gx0:0, gy0:0, gth:0}));
+
+    // voor elke link een bijdrage
+    links.forEach(link => {
+      // een link kent alleen puntnamen, we zoeken het dichtsbijzijnde
+      const aInfo = findPointOnLines(lines, link.aName);
+      const bInfo = findPointOnLines(lines, link.bName);
+      if (!aInfo || !bInfo) return;
+
+      const pa = pointFromLine(aInfo.line, aInfo.point);
+      const pb = pointFromLine(bInfo.line, bInfo.point);
+
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
+      const dist = Math.hypot(dx, dy) || 1e-6;
+      const err = dist - link.dist;
+
+      // richting van de kracht
+      const k = 1.0;
+      const fx = k * err * (dx / dist);
+      const fy = k * err * (dy / dist);
+
+      // corrigeer oorsprong van beide lijnen
+      const giA = grad[aInfo.lineIndex];
+      const giB = grad[bInfo.lineIndex];
+
+      giA.gx0 +=  fx;
+      giA.gy0 +=  fy;
+      giB.gx0 -=  fx;
+      giB.gy0 -=  fy;
+
+      // eenvoudige rotatie-correctie: moment rond oorsprong ~ kruisproduct
+      const ta = aInfo.point.t;
+      const tb = bInfo.point.t;
+      giA.gth += (ta * (-fy) + ta * fx) * 0.01;
+      giB.gth -= (tb * (-fy) + tb * fx) * 0.01;
+    });
+
+    // update lijnen
+    lines.forEach((ln, i) => {
+      ln.x0 -= grad[i].gx0 * stepPos;
+      ln.y0 -= grad[i].gy0 * stepPos;
+      ln.theta -= grad[i].gth * stepAng;
+    });
+  }
+}
+
+function findPointOnLines(lines, name) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    for (const p of line.points) {
+      if (p.name === name) {
+        return {line, lineIndex: i, point: p};
+      }
+    }
+  }
+  return null;
+}
+
+function pointFromLine(line, point) {
+  const ux = Math.cos(line.theta);
+  const uy = Math.sin(line.theta);
+  return {
+    x: line.x0 + point.t * ux,
+    y: line.y0 + point.t * uy
+  };
+}
+
+// ------------ tekenen ------------
+
+function renderSvg(lines, allPointsMap) {
   clearSvg();
 
-  const [p1, p2, p3] = pts;
-  const xs = pts.map(p => p.x);
-  const ys = pts.map(p => p.y);
+  // verzamel unieke puntcoördinaten
+  const pointCoords = new Map(); // name -> {x,y}
+  lines.forEach(line => {
+    line.points.forEach(p => {
+      const pos = pointFromLine(line, p);
+      pointCoords.set(p.name, pos);
+    });
+  });
+
+  const coords = Array.from(pointCoords.values());
+  if (!coords.length) return;
+  const xs = coords.map(c => c.x);
+  const ys = coords.map(c => c.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const pad  = 0.5 * Math.max(maxX - minX, maxY - minY, 1);
+  const pad  = 2;
+  const w = maxX - minX || 10;
+  const h = maxY - minY || 10;
+  svg.setAttribute('viewBox', `${minX-pad} ${minY-pad} ${w+2*pad} ${h+2*pad}`);
 
-  const viewMinX = minX - pad;
-  const viewMinY = minY - pad;
-  const viewW = (maxX - minX) + 2 * pad;
-  const viewH = (maxY - minY) + 2 * pad;
+  // segmenten per lijn tekenen
+  lines.forEach(line => {
+    for (let i = 0; i < line.points.length - 1; i++) {
+      const pA = line.points[i];
+      const pB = line.points[i+1];
+      const a = pointCoords.get(pA.name);
+      const b = pointCoords.get(pB.name);
+      if (!a || !b) continue;
 
-  svg.setAttribute('viewBox', `${viewMinX} ${viewMinY} ${viewW} ${viewH}`);
+      const isGebouw = /-gebouw-/i.test(''); // placeholder, maar je kunt dit
+      // per segment uit de parser halen als je dat detail weer toevoegt.
 
-  // segmenten
-  drawSegment(svg, p1, p2);
-  drawSegment(svg, p2, p3);
-  drawSegment(svg, p3, p1);
+      const seg = document.createElementNS('http://www.w3.org/2000/svg','line');
+      seg.setAttribute('x1', a.x);
+      seg.setAttribute('y1', a.y);
+      seg.setAttribute('x2', b.x);
+      seg.setAttribute('y2', b.y);
+      seg.setAttribute('class','segment ' + (isGebouw ? 'segment-gebouw' : 'segment-default'));
+      svg.appendChild(seg);
+    }
+  });
 
-  // punten + labels
-  const r = Math.max(0.02 * Math.max(viewW, viewH), 0.05);
-  pts.forEach(p => {
+  // extra: link-segmenten tekenen (optioneel visueel)
+  // (hier in grijs gestippeld)
+  // ...
+
+  // punten + labels tekenen
+  const maxDim = Math.max(w, h) || 10;
+  const r = Math.max(0.3, maxDim / 80);
+
+  pointCoords.forEach((pos, name) => {
     const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
-    c.setAttribute('cx', p.x);
-    c.setAttribute('cy', p.y);
+    c.setAttribute('cx', pos.x);
+    c.setAttribute('cy', pos.y);
     c.setAttribute('r', r);
     c.setAttribute('class','point');
     svg.appendChild(c);
 
     const label = document.createElementNS('http://www.w3.org/2000/svg','text');
-    label.setAttribute('x', p.x + r*1.5);
-    label.setAttribute('y', p.y - r*1.5);
+    label.setAttribute('x', pos.x + r*1.5);
+    label.setAttribute('y', pos.y - r*1.5);
     label.setAttribute('class','point-label');
-    label.textContent = p.id;
+    label.textContent = name;
     svg.appendChild(label);
   });
-}
-
-function drawSegment(svg, a, b) {
-  const line = document.createElementNS('http://www.w3.org/2000/svg','line');
-  line.setAttribute('x1', a.x);
-  line.setAttribute('y1', a.y);
-  line.setAttribute('x2', b.x);
-  line.setAttribute('y2', b.y);
-  line.setAttribute('class','segment');
-  svg.appendChild(line);
 }
 
 function clearSvg() {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 }
-
-// eerste keer tekenen met defaultwaarden
-drawBtn.click();
 </script>
 </body>
 </html>
