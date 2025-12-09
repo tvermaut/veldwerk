@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <title>Kadastrale metingen visualisatie</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      height: 100vh;
+      display: flex;
+    }
+    #left, #right {
+      padding: 10px;
+      height: 100vh;
+    }
+    #left {
+      width: 50%;
+      border-right: 1px solid #ccc;
+    }
+    #right {
+      width: 50%;
+    }
+    textarea {
+      width: 100%;
+      height: calc(100vh - 20px);
+      font-family: monospace;
+      font-size: 14px;
+    }
+    svg {
+      width: 100%;
+      height: 100%;
+      border: 1px solid #ccc;
+      background: #fafafa;
+    }
+    .point {
+      fill: #0074D9;
+      stroke: #003366;
+      stroke-width: 1;
+    }
+    .point-label {
+      font-size: 12px;
+      fill: #000;
+    }
+    .distance-label {
+      font-size: 11px;
+      fill: #555;
+    }
+    .segment {
+      stroke: #111;
+      stroke-width: 2;
+    }
+  </style>
+</head>
+<body>
+  <div id="left">
+    <textarea id="input"
+      placeholder="Voorbeeld:
+P1(0,0) [0] -- P2(10,0) [10] -- P3(10,5) [15]"></textarea>
+  </div>
+  <div id="right">
+    <svg id="viewBox" viewBox="0 0 100 100"></svg>
+  </div>
+
+  <script>
+    const textarea = document.getElementById('input');
+    const svg = document.getElementById('viewBox');
+
+    textarea.addEventListener('input', () => {
+      const text = textarea.value;
+      const chains = parseInput(text);
+      renderChains(chains);
+    });
+
+    // Structuur:
+    // invoer: "P1(0,0) [0] -- P2(10,0) [10]"
+    // output: [{id, x, y, distFromStart}] per keten
+    function parseInput(text) {
+      const chains = [];
+      const lines = text.split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(l => l.length > 0);
+
+      for (const line of lines) {
+        const parts = line.split(/--/);
+        const points = [];
+        for (let i = 0; i < parts.length; i++) {
+          const raw = parts[i].trim();
+          if (!raw) continue;
+
+          // identifier: eerste woord tot aan '(', '[', of spatie
+          const idMatch = raw.match(/^[^\s\(\[]+/);
+          const id = idMatch ? idMatch[0] : 'P' + (i + 1);
+
+          // coordinaat: (x,y)
+          let x = null, y = null;
+          const coordMatch = raw.match(/\(([^\)]+)\)/);
+          if (coordMatch) {
+            const nums = coordMatch[1].split(',').map(s => parseFloat(s.trim()));
+            if (nums.length >= 2 && !isNaN(nums[0]) && !isNaN(nums[1])) {
+              x = nums[0];
+              y = nums[1];
+            }
+          }
+
+          // afstand: [d]
+          let dist = null;
+          const distMatch = raw.match(/\[([^\]]+)\]/);
+          if (distMatch) {
+            const d = parseFloat(distMatch[1].trim());
+            if (!isNaN(d)) dist = d;
+          }
+
+          points.push({ id, x, y, dist });
+        }
+        if (points.length > 0) chains.push(points);
+      }
+      return chains;
+    }
+
+    function renderChains(chains) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+      // verzamel alle bekende coordinaten voor schaal
+      const coords = [];
+      for (const chain of chains) {
+        for (const p of chain) {
+          if (p.x != null && p.y != null) coords.push([p.x, p.y]);
+        }
+      }
+      if (coords.length === 0) return;
+
+      let minX = Math.min(...coords.map(c => c[0]));
+      let maxX = Math.max(...coords.map(c => c[0]));
+      let minY = Math.min(...coords.map(c => c[1]));
+      let maxY = Math.max(...coords.map(c => c[1]));
+
+      // voorkom nul-bereik
+      if (minX === maxX) { minX -= 1; maxX += 1; }
+      if (minY === maxY) { minY -= 1; maxY += 1; }
+
+      const pad = 5;
+      const width = maxX - minX;
+      const height = maxY - minY;
+
+      // viewBox aanpassen zodat alles past
+      svg.setAttribute('viewBox',
+        [minX - pad, minY - pad, width + 2 * pad, height + 2 * pad].join(' '));
+
+      // teken ketens
+      for (const chain of chains) {
+        // lijnen tussen opeenvolgende punten met bekende coord
+        for (let i = 0; i < chain.length - 1; i++) {
+          const a = chain[i];
+          const b = chain[i + 1];
+          if (a.x == null || a.y == null || b.x == null || b.y == null) continue;
+
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', a.x);
+          line.setAttribute('y1', a.y);
+          line.setAttribute('x2', b.x);
+          line.setAttribute('y2', b.y);
+          line.setAttribute('class', 'segment');
+          svg.appendChild(line);
+
+          // afstandslabel, als dist van eindpunt bekend is
+          if (b.dist != null) {
+            const mx = (a.x + b.x) / 2;
+            const my = (a.y + b.y) / 2;
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute('x', mx);
+            text.setAttribute('y', my - 1);
+            text.setAttribute('class', 'distance-label');
+            text.textContent = b.dist;
+            svg.appendChild(text);
+          }
+        }
+
+        // punten en labels
+        for (const p of chain) {
+          if (p.x == null || p.y == null) continue;
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('cx', p.x);
+          circle.setAttribute('cy', p.y);
+          circle.setAttribute('r', 0.6 * Math.max(width, height) / 50);
+          circle.setAttribute('class', 'point');
+          svg.appendChild(circle);
+
+          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          label.setAttribute('x', p.x + width / 100);
+          label.setAttribute('y', p.y - height / 100);
+          label.setAttribute('class', 'point-label');
+          label.textContent = p.id;
+          svg.appendChild(label);
+        }
+      }
+    }
+
+    // meteen initialiseren met voorbeeld
+    textarea.value = "P1(0,0) [0] -- P2(10,0) [10] -- P3(10,5) [15]";
+    textarea.dispatchEvent(new Event('input'));
+  </script>
+</body>
+</html>
