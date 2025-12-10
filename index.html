@@ -2,7 +2,7 @@
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
-  <title>Kadastrale ketens – rechte lijnen</title>
+  <title>Kadastrale ketens – rigide rechte lijnen</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: sans-serif; height: 100vh; display: flex; }
@@ -48,96 +48,101 @@ window.addEventListener('load', solveAndDraw);
 // ------------ hoofdentry ------------
 function solveAndDraw() {
   msgEl.textContent = '';
-  const text = textarea.value;
   let parsed;
   try {
-    parsed = parseInput(text);
+    parsed = parseInput(textarea.value);
   } catch (e) {
     msgEl.textContent = 'Parse-fout: ' + e.message;
     clearSvg();
     return;
   }
   const {lines, links} = parsed;
-  if (lines.length === 0) {
+  if (!lines.length) {
     msgEl.textContent = 'Geen lijnen gevonden.';
     clearSvg();
     return;
   }
 
-  optimizeLines(lines, links);
+  layoutRigidLines(lines, links);
   renderSvg(lines);
 }
 
 // ------------ parsing ------------
 
-// Invoerregels zoals:
-// P1 [0] -- P2 [5.40] -- P3 [8.83]
-// Afstand t.o.v. eerste punt van de regel.
-// Link-regel:
-// P7 [11.80] -- P4 [16.05] [25]
+// Ketenregel, voorbeeld:
+//   P1 [0] -- P2 [5.40] -- P3 [8.83] -- P4 [16.05]
+// De waarde in [ ] is de afstand t.o.v. het eerste punt van die regel.
+//
+// Linkregel (optioneel), voorbeeld:
+//   P7 [11.80] -- P4 [16.05] [25]
+// waarbij het laatste [25] de gemeten afstand tussen P7 en P4 is.
 function parseInput(text) {
   const lines = [];   // {id, points:[{name,t}], x0,y0,theta}
   const links = [];   // {aName, bName, dist}
 
-  const rows = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length);
+  const rows = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
-  rows.forEach((lineText, lineIdx) => {
-    const parts = lineText.split(/--/).map(p => p.trim()).filter(Boolean);
-    const bracketMatches = lineText.match(/\[[^\]]+\]/g) || [];
+  rows.forEach((row, idx) => {
+    const parts = row.split(/--/).map(p => p.trim()).filter(Boolean);
+    const brackets = row.match(/\[[^\]]+\]/g) || [];
 
-    // Ketenregel: elk punt heeft eigen [t]
-    if (parts.length >= 2 && bracketMatches.length >= parts.length) {
-      const line = {id: lineIdx, points: [], x0: 0, y0: 0, theta: 0};
-      parts.forEach((token, i) => {
-        const nameMatch = token.match(/^([A-Za-z]\d+)/);
-        if (!nameMatch) throw new Error('Kan puntnaam niet vinden in: ' + token);
+    // Keten: aantal [..] >= aantal punten (ieder punt zijn eigen t)
+    if (parts.length >= 2 && brackets.length >= parts.length) {
+      const line = {id: idx, points: [], x0: 0, y0: 0, theta: 0};
+      parts.forEach((tok, i) => {
+        const nameMatch = tok.match(/^([A-Za-z]\d+)/);
+        if (!nameMatch) throw new Error('Kan puntnaam niet vinden in: ' + tok);
         const name = nameMatch[1].toUpperCase();
-        const distMatch = token.match(/\[([^\]]+)\]/);
+        const distMatch = tok.match(/\[([^\]]+)\]/);
         const t = distMatch ? parseFloat(distMatch[1].replace(',', '.')) : (i === 0 ? 0 : NaN);
-        if (!isFinite(t)) throw new Error('Ongeldige afstand in: ' + token);
+        if (!isFinite(t)) throw new Error('Ongeldige afstand in: ' + tok);
         line.points.push({name, t});
       });
       lines.push(line);
 
-    // Linkregel: twee punten, één extra [afstand] aan het eind
-    } else if (parts.length === 2 && bracketMatches.length >= 1) {
+    // Linkregel: precies twee punten en één extra [afstand] op het eind
+    } else if (parts.length === 2 && brackets.length >= 1) {
       const left  = parts[0];
       const right = parts[1];
 
       const leftNameMatch  = left.match(/^([A-Za-z]\d+)/);
       const rightNameMatch = right.match(/^([A-Za-z]\d+)/);
-      if (!leftNameMatch || !rightNameMatch) throw new Error('Onjuiste link-regel: ' + lineText);
+      if (!leftNameMatch || !rightNameMatch) {
+        throw new Error('Onjuiste link-regel: ' + row);
+      }
 
       const aName = leftNameMatch[1].toUpperCase();
       const bName = rightNameMatch[1].toUpperCase();
-      const distMatch = lineText.match(/\[([^\]]+)\]\s*$/);
-      if (!distMatch) throw new Error('Geen afstand gevonden in link-regel: ' + lineText);
+      const distMatch = row.match(/\[([^\]]+)\]\s*$/);
+      if (!distMatch) throw new Error('Geen afstand gevonden in link-regel: ' + row);
 
       const d = parseFloat(distMatch[1].replace(',', '.'));
-      if (!isFinite(d)) throw new Error('Ongeldige link-afstand in: ' + lineText);
+      if (!isFinite(d)) throw new Error('Ongeldige link-afstand in: ' + row);
 
       links.push({aName, bName, dist: d});
     } else {
-      throw new Error('Onherkenbare regel: ' + lineText);
+      throw new Error('Onherkenbare regel: ' + row);
     }
   });
 
   return {lines, links};
 }
 
-// ------------ optimalisatie ------------
+// ------------ rigid layout ------------
 
-// Rotatie van lijnen wordt NIET meer aangepast, alleen x0,y0.
-// Richtingen blijven dus zoals bij initialisatie; punten blijven collineair.
-function optimizeLines(lines, links) {
-  // init: zet lijnen met vaste hoeken
+// Elke regel is een starre rechte: alle punten P_i = p0 + t_i * u.
+// Richting u (theta) staat vast per regel; alleen p0 (x0,y0) wordt verschoven
+// op basis van link-afstanden. Daardoor kan een lijn nooit knikken.
+function layoutRigidLines(lines, links) {
+  // initiële richting per lijn
   lines.forEach((ln, i) => {
     ln.x0 = 0;
-    ln.y0 = i * 10;       // verticale spreiding
-    ln.theta = 0.4 * i;   // vaste, verschillende richtingen per lijn
+    ln.y0 = i * 10;      // verticale spreiding
+    ln.theta = 0.4 * i;  // vaste verschillende richtingen
   });
 
-  const iters   = 400;
+  // eenvoudige iteratieve verschuiving op basis van link-afstanden
+  const iters = 300;
   const stepPos = 0.02;
 
   for (let it = 0; it < iters; it++) {
@@ -156,23 +161,23 @@ function optimizeLines(lines, links) {
       const dx = pb.x - pa.x;
       const dy = pb.y - pa.y;
       const dist = Math.hypot(dx, dy) || 1e-6;
-      const err  = dist - link.dist;
+      const err = dist - link.dist;
 
-      const k  = 1.0;
+      const k = 1.0;
       const fx = k * err * (dx / dist);
       const fy = k * err * (dy / dist);
 
       const gA = grad[aInfo.lineIndex];
       const gB = grad[bInfo.lineIndex];
 
-      // alleen translatie (geen rotatie)
+      // alleen translatie van lijnen; geen rotatie
       gA.gx0 +=  fx;
       gA.gy0 +=  fy;
       gB.gx0 -=  fx;
       gB.gy0 -=  fy;
     });
 
-    // update: alleen x0,y0 per lijn
+    // update oorsprongen
     lines.forEach((ln, i) => {
       ln.x0 -= grad[i].gx0 * stepPos;
       ln.y0 -= grad[i].gy0 * stepPos;
@@ -185,7 +190,7 @@ function findPointOnLines(lines, name) {
     const line = lines[i];
     for (const p of line.points) {
       if (p.name === name) {
-        return {line, lineIndex: i, point: p};
+        return { line, lineIndex: i, point: p };
       }
     }
   }
@@ -216,6 +221,7 @@ function renderSvg(lines) {
 
   const coords = Array.from(pointCoords.values());
   if (!coords.length) return;
+
   const xs = coords.map(c => c.x);
   const ys = coords.map(c => c.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -223,23 +229,24 @@ function renderSvg(lines) {
   const pad  = 2;
   const w = maxX - minX || 10;
   const h = maxY - minY || 10;
-  svg.setAttribute('viewBox', `${minX - pad} ${minY - pad} ${w + 2*pad} ${h + 2*pad}`);
+  svg.setAttribute('viewBox',
+    `${minX - pad} ${minY - pad} ${w + 2 * pad} ${h + 2 * pad}`);
 
   // segmenten per lijn
   lines.forEach(line => {
     for (let i = 0; i < line.points.length - 1; i++) {
       const pA = line.points[i];
-      const pB = line.points[i+1];
+      const pB = line.points[i + 1];
       const a = pointCoords.get(pA.name);
       const b = pointCoords.get(pB.name);
       if (!a || !b) continue;
 
-      const seg = document.createElementNS('http://www.w3.org/2000/svg','line');
+      const seg = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       seg.setAttribute('x1', a.x);
       seg.setAttribute('y1', a.y);
       seg.setAttribute('x2', b.x);
       seg.setAttribute('y2', b.y);
-      seg.setAttribute('class','segment segment-default');
+      seg.setAttribute('class', 'segment segment-default');
       svg.appendChild(seg);
     }
   });
@@ -249,17 +256,17 @@ function renderSvg(lines) {
   const r = Math.max(0.3, maxDim / 80);
 
   pointCoords.forEach((pos, name) => {
-    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     c.setAttribute('cx', pos.x);
     c.setAttribute('cy', pos.y);
     c.setAttribute('r', r);
-    c.setAttribute('class','point');
+    c.setAttribute('class', 'point');
     svg.appendChild(c);
 
-    const label = document.createElementNS('http://www.w3.org/2000/svg','text');
-    label.setAttribute('x', pos.x + r*1.5);
-    label.setAttribute('y', pos.y - r*1.5);
-    label.setAttribute('class','point-label');
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', pos.x + r * 1.5);
+    label.setAttribute('y', pos.y - r * 1.5);
+    label.setAttribute('class', 'point-label');
     label.textContent = name;
     svg.appendChild(label);
   });
