@@ -10,11 +10,12 @@
     #right { width: 55%; padding: 10px; }
     textarea { width: 100%; height: calc(100vh - 60px); font-family: monospace; font-size: 13px; }
     button { margin-top: 6px; padding: 6px 10px; }
-    svg { width: 100%; height: calc(100vh - 20px); border: 1px solid #ccc; background: #fafafa; }
-    .point { fill: #0074D9; stroke: #003366; stroke-width: 1; }
-    .point-label { font-size: 11px; fill: #000; }
-    .distance-label { font-size: 10px; fill: #555; }
-    .segment { stroke-width: 2; }
+    svg { width: 100%; height: calc(100vh - 20px); border: 1px solid #ccc; background: #fafafa; cursor: grab; }
+    .point { fill: #0074D9; stroke: #003366; stroke-width: 0.1; }
+    .point-label { font-size: 1.1px; fill: #000; }
+    .residual-label { font-size: 1px; fill: #d00; }
+    .distance-label { font-size: 1px; fill: #555; }
+    .segment { stroke-width: 0.2; }
     .segment-default { stroke: #111; }
     .segment-gebouw { stroke: #d00; }
     .error { color: #b00; margin-top: 6px; white-space: pre-line; }
@@ -42,10 +43,72 @@ const svg      = document.getElementById('viewBox');
 const solveBtn = document.getElementById('solveBtn');
 const msgEl    = document.getElementById('msg');
 
+let currentViewBox = {x: 0, y: 0, w: 100, h: 100};
+
 solveBtn.addEventListener('click', solveAndDraw);
 window.addEventListener('load', solveAndDraw);
 
-// ------------ hoofdentry ------------
+// pan/zoom state
+let isPanning = false;
+let panStart = {x: 0, y: 0};
+let viewBoxStart = null;
+
+// muis naar SVG-coördinaten
+function clientToSvg(evt) {
+  const pt = svg.createSVGPoint();
+  pt.x = evt.clientX;
+  pt.y = evt.clientY;
+  const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
+  return {x: svgP.x, y: svgP.y};
+}
+
+// pannen
+svg.addEventListener('mousedown', evt => {
+  isPanning = true;
+  svg.style.cursor = 'grabbing';
+  panStart = clientToSvg(evt);
+  viewBoxStart = {...currentViewBox};
+});
+window.addEventListener('mouseup', () => {
+  isPanning = false;
+  svg.style.cursor = 'grab';
+});
+window.addEventListener('mousemove', evt => {
+  if (!isPanning) return;
+  const pos = clientToSvg(evt);
+  const dx = pos.x - panStart.x;
+  const dy = pos.y - panStart.y;
+  currentViewBox.x = viewBoxStart.x - dx;
+  currentViewBox.y = viewBoxStart.y - dy;
+  applyViewBox();
+});
+
+// zoomen met muiswiel
+svg.addEventListener('wheel', evt => {
+  evt.preventDefault();
+  const scaleFactor = evt.deltaY < 0 ? 0.9 : 1.1;
+  const mouse = clientToSvg(evt);
+  const vb = currentViewBox;
+
+  const newW = vb.w * scaleFactor;
+  const newH = vb.h * scaleFactor;
+
+  const mx = (mouse.x - vb.x) / vb.w;
+  const my = (mouse.y - vb.y) / vb.h;
+
+  currentViewBox.x = mouse.x - mx * newW;
+  currentViewBox.y = mouse.y - my * newH;
+  currentViewBox.w = newW;
+  currentViewBox.h = newH;
+  applyViewBox();
+}, {passive: false});
+
+function applyViewBox() {
+  svg.setAttribute('viewBox',
+    `${currentViewBox.x} ${currentViewBox.y} ${currentViewBox.w} ${currentViewBox.h}`);
+}
+
+// -------- hoofdentry --------
 function solveAndDraw() {
   msgEl.textContent = '';
   let parsed;
@@ -64,7 +127,7 @@ function solveAndDraw() {
   }
 
   layoutRigidLines(lines, links);
-  renderSvg(lines);
+  renderSvg(lines, links);
 }
 
 // ------------ parsing ------------
@@ -75,7 +138,6 @@ function solveAndDraw() {
 //
 // Linkregel (optioneel), voorbeeld:
 //   P7 [11.80] -- P4 [16.05] [25]
-// waarbij het laatste [25] de gemeten afstand tussen P7 en P4 is.
 function parseInput(text) {
   const lines = [];   // {id, points:[{name,t}], x0,y0,theta}
   const links = [];   // {aName, bName, dist}
@@ -132,7 +194,7 @@ function parseInput(text) {
 
 // Elke regel is een starre rechte: alle punten P_i = p0 + t_i * u.
 // Richting u (theta) staat vast per regel; alleen p0 (x0,y0) wordt verschoven
-// op basis van link-afstanden. Daardoor kan een lijn nooit knikken.
+// op basis van link-afstanden. Hierdoor kan een lijn niet knikken.
 function layoutRigidLines(lines, links) {
   // initiële richting per lijn
   lines.forEach((ln, i) => {
@@ -141,7 +203,6 @@ function layoutRigidLines(lines, links) {
     ln.theta = 0.4 * i;  // vaste verschillende richtingen
   });
 
-  // eenvoudige iteratieve verschuiving op basis van link-afstanden
   const iters = 300;
   const stepPos = 0.02;
 
@@ -170,14 +231,12 @@ function layoutRigidLines(lines, links) {
       const gA = grad[aInfo.lineIndex];
       const gB = grad[bInfo.lineIndex];
 
-      // alleen translatie van lijnen; geen rotatie
       gA.gx0 +=  fx;
       gA.gy0 +=  fy;
       gB.gx0 -=  fx;
       gB.gy0 -=  fy;
     });
 
-    // update oorsprongen
     lines.forEach((ln, i) => {
       ln.x0 -= grad[i].gx0 * stepPos;
       ln.y0 -= grad[i].gy0 * stepPos;
@@ -206,9 +265,9 @@ function pointFromLine(line, point) {
   };
 }
 
-// ------------ tekenen ------------
+// ------------ tekenen + residu's ------------
 
-function renderSvg(lines) {
+function renderSvg(lines, links) {
   clearSvg();
 
   const pointCoords = new Map(); // name -> {x,y}
@@ -218,6 +277,34 @@ function renderSvg(lines) {
       pointCoords.set(p.name, pos);
     });
   });
+
+  // residu per link op positie/lengte
+  const pointResidual = new Map(); // name -> max |dist_err|
+  const segResidual = [];          // {x,y,err}
+
+  if (links) {
+    links.forEach(link => {
+      const a = pointCoords.get(link.aName);
+      const b = pointCoords.get(link.bName);
+      if (!a || !b) return;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const dist = Math.hypot(dx, dy) || 1e-6;
+      const err = dist - link.dist;
+
+      const absErr = Math.abs(err);
+      const prevA = pointResidual.get(link.aName) || 0;
+      const prevB = pointResidual.get(link.bName) || 0;
+      pointResidual.set(link.aName, Math.max(prevA, absErr));
+      pointResidual.set(link.bName, Math.max(prevB, absErr));
+
+      segResidual.push({
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+        err: err
+      });
+    });
+  }
 
   const coords = Array.from(pointCoords.values());
   if (!coords.length) return;
@@ -229,8 +316,15 @@ function renderSvg(lines) {
   const pad  = 2;
   const w = maxX - minX || 10;
   const h = maxY - minY || 10;
-  svg.setAttribute('viewBox',
-    `${minX - pad} ${minY - pad} ${w + 2 * pad} ${h + 2 * pad}`);
+
+  // initiale viewBox voor netjes beeld; daarna kan gebruiker pannen/zoomen
+  currentViewBox = {
+    x: minX - pad,
+    y: minY - pad,
+    w: w + 2 * pad,
+    h: h + 2 * pad
+  };
+  applyViewBox();
 
   // segmenten per lijn
   lines.forEach(line => {
@@ -251,9 +345,19 @@ function renderSvg(lines) {
     }
   });
 
-  // punten + labels
+  // residu-tekst bij lijnmiddens
+  segResidual.forEach(sr => {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', sr.x);
+    t.setAttribute('y', sr.y);
+    t.setAttribute('class', 'residual-label');
+    t.textContent = `Δd=${sr.err.toFixed(3)}`;
+    svg.appendChild(t);
+  });
+
+  // punten + labels + residu-tekst
   const maxDim = Math.max(w, h) || 10;
-  const r = Math.max(0.3, maxDim / 80);
+  const r = Math.max(0.1, maxDim / 200);
 
   pointCoords.forEach((pos, name) => {
     const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -269,6 +373,16 @@ function renderSvg(lines) {
     label.setAttribute('class', 'point-label');
     label.textContent = name;
     svg.appendChild(label);
+
+    const res = pointResidual.get(name) || 0;
+    if (res > 0) {
+      const rlabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      rlabel.setAttribute('x', pos.x + r * 1.5);
+      rlabel.setAttribute('y', pos.y + r * 1.5);
+      rlabel.setAttribute('class', 'residual-label');
+      rlabel.textContent = `Δ=${res.toFixed(3)}`;
+      svg.appendChild(rlabel);
+    }
   });
 }
 
